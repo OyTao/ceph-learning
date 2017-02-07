@@ -340,6 +340,10 @@ bool PG::proc_replica_info(
   peer_info[from] = oinfo;
   might_have_unfound.insert(from);
   
+  /* 
+   * OyTao: merge pg history info with @oinfo 
+   * update(last_epoch_started, last_epoch_clean, last_epoch* as max-values)
+   */
   unreg_next_scrub();
   if (info.history.merge(oinfo.history))
     dirty_info = true;
@@ -355,6 +359,9 @@ bool PG::proc_replica_info(
   }
 
   // was this a new info?  if so, update peers!
+  /*
+   * OyTao: why can have one new info from other osd
+   */
   if (p == peer_info.end())
     update_heartbeat_peers();
 
@@ -712,6 +719,9 @@ void PG::generate_past_intervals()
   vector<int> acting, up, old_acting, old_up;
 
   cur_map = osd->get_map(cur_epoch);
+  /*
+   * OyTao: get all up, primary osds set and primay osd in each sets.
+   */
   cur_map->pg_to_up_acting_osds(
     get_pgid().pgid, &up, &up_primary, &acting, &primary);
   epoch_t same_interval_since = cur_epoch;
@@ -725,15 +735,21 @@ void PG::generate_past_intervals()
     old_up.swap(up);
     old_acting.swap(acting);
 
+	/* OyTao: get ancestor pgid  ??? */
     cur_map = osd->get_map(cur_epoch);
     pg_t pgid = get_pgid().pgid;
     if (last_map->get_pools().count(pgid.pool()))
       pgid = pgid.get_ancestor(last_map->get_pg_num(pgid.pool()));
+
     cur_map->pg_to_up_acting_osds(pgid, &up, &up_primary, &acting, &primary);
 
     boost::scoped_ptr<IsPGRecoverablePredicate> recoverable(
       get_is_recoverable_predicate());
     std::stringstream debug;
+	/* OyTao: 
+	 * 1. check that last epoch and cur epoch are in same interval
+	 * 2. update past intervals if have new internval.
+	 */
     bool new_interval = pg_interval_t::check_new_interval(
       old_primary,
       primary,
@@ -880,7 +896,11 @@ void PG::build_prior(std::unique_ptr<PriorSet> &prior_set)
   if (prior.pg_down) {
     state_set(PG_STATE_DOWN);
   }
-
+  /*
+   * OyTao:
+   * if OSD B current up_thru is 2, the same_interval_since is 4.
+   * need to update up_thru of OSD B to 4.
+   */
   if (get_osdmap()->get_up_thru(osd->whoami) < info.history.same_interval_since) {
     dout(10) << "up_thru " << get_osdmap()->get_up_thru(osd->whoami)
 	     << " < same_since " << info.history.same_interval_since
@@ -939,7 +959,10 @@ void PG::clear_primary_state()
  *  2) Prefer longer tail if it brings another info into contiguity
  *  3) Prefer current primary
  */
-map<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
+/*
+ * OyTao: 选取权威日志
+ */
+ap<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
   const map<pg_shard_t, pg_info_t> &infos) const
 {
   /* See doc/dev/osd_internals/last_epoch_started.rst before attempting
@@ -947,20 +970,26 @@ map<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
    * when you find bugs! */
   eversion_t min_last_update_acceptable = eversion_t::max();
   epoch_t max_last_epoch_started_found = 0;
+
+  /* OyTao: get @max_last_epoch_started_found in all infos */
   for (map<pg_shard_t, pg_info_t>::const_iterator i = infos.begin();
        i != infos.end();
        ++i) {
+
+	  /* OyTao: first compare history pg_info_t */
     if (!cct->_conf->osd_find_best_info_ignore_history_les &&
 	max_last_epoch_started_found < i->second.history.last_epoch_started) {
       min_last_update_acceptable = eversion_t::max();
       max_last_epoch_started_found = i->second.history.last_epoch_started;
     }
+	/* OyTao: second compare pg_info_t */
     if (!i->second.is_incomplete() &&
 	max_last_epoch_started_found < i->second.last_epoch_started) {
       min_last_update_acceptable = eversion_t::max();
       max_last_epoch_started_found = i->second.last_epoch_started;
     }
   }
+
   for (map<pg_shard_t, pg_info_t>::const_iterator i = infos.begin();
        i != infos.end();
        ++i) {
@@ -969,6 +998,7 @@ map<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
 	min_last_update_acceptable = i->second.last_update;
     }
   }
+
   if (min_last_update_acceptable == eversion_t::max())
     return infos.end();
 
@@ -2399,6 +2429,7 @@ void PG::update_heartbeat_peers()
     osd->need_heartbeat_peer_update();
 }
 
+/* OyTao: TODO */
 void PG::_update_calc_stats()
 {
   info.stats.version = info.last_update;
@@ -2490,6 +2521,7 @@ void PG::_update_calc_stats()
   }
 }
 
+/* OyTao: TODO */
 void PG::_update_blocked_by()
 {
   // set a max on the number of blocking peers we report. if we go
@@ -2535,7 +2567,10 @@ void PG::publish_stats_to_osd()
       info.stats.last_became_peered = now;
   }
 
+  /* OyTao: TODO */
   _update_calc_stats();
+
+  /* OyTao: TODO */
   _update_blocked_by();
 
   bool publish = false;
@@ -6929,11 +6964,21 @@ PG::RecoveryState::GetInfo::GetInfo(my_context ctx)
   context< RecoveryMachine >().log_enter(state_name);
 
   PG *pg = context< RecoveryMachine >().pg;
+  /*
+   * OyTao:
+   * generate past intervals 
+   * 一个Interval内部，该PG内部的OSD没有发生变化。
+   */
   pg->generate_past_intervals();
   unique_ptr<PriorSet> &prior_set = context< Peering >().prior_set;
 
   assert(pg->blocked_by.empty());
 
+  /* OyTao:
+   * get probe osds set
+   * 1. current up and active osd sets.
+   * 2. past intervals up osd osds.
+   */
   if (!prior_set.get())
     pg->build_prior(prior_set);
 
@@ -6981,6 +7026,9 @@ void PG::RecoveryState::GetInfo::get_infos()
   pg->publish_stats_to_osd();
 }
 
+/*
+ * OyTao: primary Osd received pg_info_t from non-primary osds.
+ */
 boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& infoevt) 
 {
   PG *pg = context< RecoveryMachine >().pg;
@@ -6992,10 +7040,18 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
   }
 
   epoch_t old_start = pg->info.history.last_epoch_started;
+
+  /* OyTao: if this info is good */
   if (pg->proc_replica_info(
 	infoevt.from, infoevt.notify.info, infoevt.notify.epoch_sent)) {
     // we got something new ...
     unique_ptr<PriorSet> &prior_set = context< Peering >().prior_set;
+
+	/* OyTao: 
+	 * if primary osd history info merge with @infoevt in proc_replica_info,
+	 * rebuild prior and get infos.
+	 * Why? Maybe shutdown in peering process.
+	 */
     if (old_start < pg->info.history.last_epoch_started) {
       dout(10) << " last_epoch_started moved forward, rebuilding prior" << dendl;
       pg->build_prior(prior_set);
@@ -7019,6 +7075,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
     pg->apply_peer_features(infoevt.features);
 
     // are we done getting everything?
+	/* OyTao: primary osd have received all non-primary osds infos */
     if (peer_info_requested.empty() && !prior_set->pg_down) {
       /*
        * make sure we have at least one !incomplete() osd from the
@@ -7033,6 +7090,9 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 	     ++p) {
 	  if (p->first < pg->info.history.last_epoch_started)
 	    break;
+	  /*
+	   * OyTao: maybe have rw in this interval.
+	   */
 	  if (!p->second.maybe_went_rw)
 	    continue;
 	  pg_interval_t& interval = p->second;
@@ -7051,6 +7111,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 	    if (o == CRUSH_ITEM_NONE)
 	      continue;
 	    pg_shard_t so(o, pg->pool.info.ec_pool() ? shard_id_t(i) : shard_id_t::NO_SHARD);
+		/* OyTao: get pg_info of osd @so */
 	    if (!osdmap->exists(o) || osdmap->get_info(o).lost_at > interval.first)
 	      continue;  // dne or lost
 	    if (osdmap->is_up(o)) {
@@ -7061,6 +7122,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 		assert(pg->peer_info.count(so));
 		pinfo = &pg->peer_info[so];
 	      }
+			/* OyTao: how to check it is incomplete ??(TODO) */
 	      if (!pinfo->is_incomplete())
 		any_up_complete_now = true;
 	    } else {
@@ -7120,6 +7182,10 @@ void PG::RecoveryState::GetInfo::exit()
 }
 
 /*------GetLog------------*/
+/*
+ * OyTao: primary osd get all non-primary osds pg_info_t and 
+ * all past intervals are complete, then go to there.
+ */
 PG::RecoveryState::GetLog::GetLog(my_context ctx)
   : my_base(ctx),
     NamedState(

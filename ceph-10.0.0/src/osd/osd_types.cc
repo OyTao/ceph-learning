@@ -2781,6 +2781,9 @@ bool pg_interval_t::is_new_interval(
 		    pgid);
 }
 
+/*
+ * OyTao: could have gone active
+ */
 bool pg_interval_t::check_new_interval(
   int old_acting_primary,
   int new_acting_primary,
@@ -2815,6 +2818,11 @@ bool pg_interval_t::check_new_interval(
 	osdmap,
 	lastmap,
 	pgid)) {
+	/*
+	 * OyTao: past interval
+	 * (from @same_interval_since to osdmap->get_epoch() -1)
+	 * @cur_epoch is new intervals.
+	 */
     pg_interval_t& i = (*past_intervals)[same_interval_since];
     i.first = same_interval_since;
     i.last = osdmap->get_epoch() - 1;
@@ -2830,6 +2838,7 @@ bool pg_interval_t::check_new_interval(
       if (*p != CRUSH_ITEM_NONE)
 	++num_acting;
 
+	/* OyTao: convert old acting to old acting shards */
     const pg_pool_t& old_pg_pool = lastmap->get_pools().find(pgid.pool())->second;
     set<pg_shard_t> old_acting_shards;
     old_pg_pool.convert_to_pg_shards(old_acting, &old_acting_shards);
@@ -2847,6 +2856,7 @@ bool pg_interval_t::check_new_interval(
 	     << std::endl;
       if (lastmap->get_up_thru(i.primary) >= i.first &&
 	  lastmap->get_up_from(i.primary) <= i.first) {
+	/* OyTao; maybe have been rw in this interval */
 	i.maybe_went_rw = true;
 	if (out)
 	  *out << "generate_past_intervals " << i

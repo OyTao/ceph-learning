@@ -70,12 +70,17 @@ int crush_find_rule(const struct crush_map *map, int ruleset, int type, int size
  * Since this is expensive, we optimize for the r=0 case, which
  * captures the vast majority of calls.
  */
+/*
+ * OyTao: 因为随机性，在size发生变化时候，即使x相同，perm数据也会重新排列，
+ * 这样就意味着所有的映射都会发生变化，会造成很多的数据迁移
+ */
 static int bucket_perm_choose(struct crush_bucket *bucket,
 			      int x, int r)
 {
 	unsigned int pr = r % bucket->size;
 	unsigned int i, s;
 
+	/* OyTao: 初始化perm 数组 */
 	/* start a new permutation if @x has changed */
 	if (bucket->perm_x != (__u32)x || bucket->perm_n == 0) {
 		dprintk("bucket %d new x=%d\n", bucket->id, x);
@@ -104,6 +109,9 @@ static int bucket_perm_choose(struct crush_bucket *bucket,
 	/* calculate permutation up to pr */
 	for (i = 0; i < bucket->perm_n; i++)
 		dprintk(" perm_choose have %d: %d\n", i, bucket->perm[i]);
+
+	/* OyTao: 随机排布分布item (固定的x, id, size, p产生的排布是一致的) */
+	/* OyTao: 从perm_n开始，后面的交换 交换位置(p, crush(hash, x, id, p) */
 	while (bucket->perm_n <= pr) {
 		unsigned int p = bucket->perm_n;
 		/* no point in swapping the final entry */
@@ -122,6 +130,7 @@ static int bucket_perm_choose(struct crush_bucket *bucket,
 	for (i = 0; i < bucket->size; i++)
 		dprintk(" perm_choose  %d: %d\n", i, bucket->perm[i]);
 
+	/* OyTao: 得到一个索引，根据这个获取item */
 	s = bucket->perm[pr];
 out:
 	dprintk(" perm_choose %d sz=%d x=%d r=%d (%d) s=%d\n", bucket->id,
@@ -137,6 +146,16 @@ static int bucket_uniform_choose(struct crush_bucket_uniform *bucket,
 }
 
 /* list */
+/* OyTao: 
+ * 每个item都保存了自己的weight, 同时也保存从index=0到自己的所有的weight总和，
+ * 在size,以及item weight不变化的情况下，同样的x选择的item是一致的。
+ * 在增加了新的item，会增加在尾部，这样只会更新新的item的sum_weights,其他的item
+ * 的sum_weights,以及本身的weight都不会发生变化.
+ * bucket_list_choose 是从尾部开始遍历，这样在增加新的item，数据迁移只会发生在
+ * 新的item与旧的item中间。
+ * 如果是删除Item，则可能会影响很多item的sum_weights, 影响较大。
+ * 缺点：在查找item时候，时间复杂度是O(n)
+ */
 static int bucket_list_choose(struct crush_bucket_list *bucket,
 			      int x, int r)
 {
@@ -150,8 +169,10 @@ static int bucket_list_choose(struct crush_bucket_list *bucket,
 			"sw %x rand %llx",
 			i, x, r, bucket->h.items[i], bucket->item_weights[i],
 			bucket->sum_weights[i], w);
+
 		w *= bucket->sum_weights[i];
 		w = w >> 16;
+
 		/*dprintk(" scaled %llx\n", w);*/
 		if (w < bucket->item_weights[i])
 			return bucket->h.items[i];
@@ -190,6 +211,23 @@ static int terminal(int x)
 	return x & 1;
 }
 
+/* 
+ * OyTao:
+ * tree bucket是借助一个node_weight实现树的结构的。
+ *
+ * node_weights  0  1  2  1  4  1  2  1 
+ *					 \   /       \   /
+ *					   2		   2
+ *						\	      /
+ *							 4
+ * 上图中idx = 1, 3, 5, 7为真实的item节点，其他的为树中间节点。辅助查找。
+ *
+ * tree bucket choose过程：
+ * 首先从根节点开始，如果计算得到的hash指小于left, 则遍历左节点，否则遍历右节点。
+ * hash值得计算（x, n r）
+ * 如果n变动，则各个pg的hash值会发生变化，可能导致会有大量的迁移。
+ */
+
 static int bucket_tree_choose(struct crush_bucket_tree *bucket,
 			      int x, int r)
 {
@@ -221,7 +259,6 @@ static int bucket_tree_choose(struct crush_bucket_tree *bucket,
 
 
 /* straw */
-
 static int bucket_straw_choose(struct crush_bucket_straw *bucket,
 			       int x, int r)
 {
@@ -293,6 +330,13 @@ static __u64 crush_ln(unsigned int xin)
  * http://en.wikipedia.org/wiki/Exponential_distribution#Distribution_of_the_minimum_of_exponential_random_variables
  *
  */
+/*
+ * OyTao:
+ * 查找过程需要遍历所有的item,在查找效率上比List，Tree差。
+ * 如果新增加了一个item,改变的只有本身item的hash值, 
+ * 数据迁移应该也只会在以前的节点与当前的节点中间。
+ * 迁移的范围暂时未知。
+ */ 
 
 static int bucket_straw2_choose(struct crush_bucket_straw2 *bucket,
 				int x, int r)
@@ -452,6 +496,7 @@ static int crush_choose_firstn(const struct crush_map *map,
 			do {
 				collide = 0;
 				retry_bucket = 0;
+
 				r = rep + parent_r;
 				/* r' = r + f_total */
 				r += ftotal;
@@ -461,12 +506,16 @@ static int crush_choose_firstn(const struct crush_map *map,
 					reject = 1;
 					goto reject;
 				}
+
+				/* OyTao： 如果local尝试的次数超过一半，则采用perm方式选择 */
 				if (local_fallback_retries > 0 &&
 				    flocal >= (in->size>>1) &&
 				    flocal > local_fallback_retries)
 					item = bucket_perm_choose(in, x, r);
+
 				else
 					item = crush_bucket_choose(in, x, r);
+
 				if (item >= map->max_devices) {
 					dprintk("   bad item %d\n", item);
 					skip_rep = 1;
@@ -488,11 +537,13 @@ static int crush_choose_firstn(const struct crush_map *map,
 						skip_rep = 1;
 						break;
 					}
+					/* get new child buckets */
 					in = map->buckets[-1-item];
 					retry_bucket = 1;
 					continue;
 				}
 
+				/* OyTao: 如果找到对应的type的item,检测冲突 */
 				/* collision? */
 				for (i = 0; i < outpos; i++) {
 					if (out[i] == item) {
@@ -502,13 +553,16 @@ static int crush_choose_firstn(const struct crush_map *map,
 				}
 
 				reject = 0;
+				/* OyTao: 递归查找到叶节点 */
 				if (!collide && recurse_to_leaf) {
 					if (item < 0) {
+						/* OyTao: sub_r 作用暂时未知 */
 						int sub_r;
 						if (vary_r)
 							sub_r = r >> (vary_r-1);
 						else
 							sub_r = 0;
+
 						if (crush_choose_firstn(map,
 							 map->buckets[-1-item],
 							 weight, weight_max,
@@ -531,6 +585,7 @@ static int crush_choose_firstn(const struct crush_map *map,
 
 				if (!reject) {
 					/* out? */
+					/* OyTao: 判断item是否已经out */
 					if (itemtype == 0)
 						reject = is_out(map, weight,
 								weight_max,
@@ -547,10 +602,12 @@ reject:
 					if (collide && flocal <= local_retries)
 						/* retry locally a few times */
 						retry_bucket = 1;
+
 					else if (local_fallback_retries > 0 &&
 						 flocal <= in->size + local_fallback_retries)
 						/* exhaustive bucket search */
 						retry_bucket = 1;
+
 					else if (ftotal < tries)
 						/* then retry descent */
 						retry_descent = 1;
@@ -562,6 +619,7 @@ reject:
 						reject, collide, ftotal,
 						flocal);
 				}
+
 			} while (retry_bucket);
 		} while (retry_descent);
 
@@ -574,6 +632,7 @@ reject:
 		out[outpos] = item;
 		outpos++;
 		count--;
+
 #ifndef __KERNEL__
 		if (map->choose_tries && ftotal <= map->choose_total_tries)
 			map->choose_tries[ftotal]++;
@@ -667,6 +726,7 @@ static void crush_choose_indep(const struct crush_map *map,
 					dprintk("   empty bucket\n");
 					break;
 				}
+				
 
 				item = crush_bucket_choose(in, x, r);
 				if (item >= map->max_devices) {
@@ -782,6 +842,17 @@ static void crush_choose_indep(const struct crush_map *map,
  * @weight_max: size of weight vector
  * @scratch: scratch vector for private use; must be >= 3 * result_max
  */
+/*
+ * OyTao:
+ * choose_tries:
+ * choose_leaf_tries:
+ * choose_local_retries:
+ * choose_local_fallback_retries:
+ * choose_leaf_vary:
+ *
+ *
+ */
+
 int crush_do_rule(const struct crush_map *map,
 		  int ruleno, int x, int *result, int result_max,
 		  const __u32 *weight, int weight_max,
@@ -879,6 +950,7 @@ int crush_do_rule(const struct crush_map *map,
 			if (wsize == 0)
 				break;
 
+			/* OyTao: 是否需要直接找到最终的leaf item */
 			recurse_to_leaf =
 				curstep->op ==
 				 CRUSH_RULE_CHOOSELEAF_FIRSTN ||
@@ -901,6 +973,7 @@ int crush_do_rule(const struct crush_map *map,
 					if (numrep <= 0)
 						continue;
 				}
+
 				j = 0;
 				/* make sure bucket id is valid */
 				bno = -1 - w[i];
@@ -909,6 +982,7 @@ int crush_do_rule(const struct crush_map *map,
 					dprintk("  bad w[i] %d\n", w[i]);
 					continue;
 				}
+
 				if (firstn) {
 					int recurse_tries;
 					if (choose_leaf_tries)

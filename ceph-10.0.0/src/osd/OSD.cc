@@ -5773,9 +5773,11 @@ void OSD::dispatch_op(OpRequestRef op)
   case MSG_OSD_PG_CREATE:
     handle_pg_create(op);
     break;
+	/* OyTao: receive notify from non-prmiary osds */
   case MSG_OSD_PG_NOTIFY:
     handle_pg_notify(op);
     break;
+  /* OyTao: Get Info (primary osd ---> other osds) */
   case MSG_OSD_PG_QUERY:
     handle_pg_query(op);
     break;
@@ -7241,6 +7243,9 @@ void OSD::dispatch_context_transaction(PG::RecoveryCtx &ctx, PG *pg,
   }
 }
 
+/* 
+ * OyTao: dispatch context query
+ */
 void OSD::dispatch_context(PG::RecoveryCtx &ctx, PG *pg, OSDMapRef curmap,
                            ThreadPool::TPHandle *handle)
 {
@@ -7372,6 +7377,10 @@ void OSD::do_infos(map<int,
  * from non-primary to primary
  * includes pg_info_t.
  * NOTE: called with opqueue active.
+ */
+
+/*
+ * OyTao: primary OSD receive pg_info_t from non-primary osds.
  */
 void OSD::handle_pg_notify(OpRequestRef op)
 {
@@ -7717,6 +7726,7 @@ void OSD::handle_pg_query(OpRequestRef op)
 
     dout(10) << " pg " << pgid << " dne" << dendl;
     pg_info_t empty(spg_t(pgid.pgid, it->second.to));
+
     /* This is racy, but that should be ok: if we complete the deletion
      * before the pg is recreated, we'll just start it off backfilling
      * instead of just empty */
@@ -7744,6 +7754,7 @@ void OSD::handle_pg_query(OpRequestRef op)
 	  pg_interval_map_t()));
     }
   }
+  /* OyTao: send notifies */
   do_notifies(notify_list, osdmap);
 }
 
@@ -8479,6 +8490,7 @@ void OSD::process_peering_events(
       pg->unlock();
       continue;
     }
+	/* OyTao: TODO */
     if (!advance_pg(curmap->get_epoch(), pg, handle, &rctx, &split_pgs)) {
       // we need to requeue the PG explicitly since we didn't actually
       // handle an event

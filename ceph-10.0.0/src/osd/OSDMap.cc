@@ -1685,10 +1685,16 @@ void OSDMap::pg_to_raw_up(pg_t pg, vector<int> *up, int *primary) const
   _apply_primary_affinity(pps, *pool, up, primary);
 }
   
+/*
+ * OyTao: get up osd set, active osds set, primary up osd, and primary active osd.
+ */
 void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_primary,
                                    vector<int> *acting, int *acting_primary) const
 {
   const pg_pool_t *pool = get_pg_pool(pg.pool());
+  /* 
+   * OyTao: no pg pool Object, return error
+   */
   if (!pool) {
     if (up)
       up->clear();
@@ -1706,9 +1712,14 @@ void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_prim
   int _up_primary;
   int _acting_primary;
   ps_t pps;
+  /* OyTao: get all up osds based on the crush and first as primary */
   _pg_to_osds(*pool, pg, &raw, &_up_primary, &pps);
   _raw_to_up_osds(*pool, raw, &_up, &_up_primary);
+
+  /* OyTao: update primary based on affinity */
   _apply_primary_affinity(pps, *pool, &_up, &_up_primary);
+
+  /* OyTao: get _acting and _acting_primary from pg_temp and primary_temp */
   _get_temp_osds(*pool, pg, &_acting, &_acting_primary);
   if (_acting.empty()) {
     _acting = _up;
@@ -1716,6 +1727,7 @@ void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_prim
       _acting_primary = _up_primary;
     }
   }
+
   if (up)
     up->swap(_up);
   if (up_primary)
