@@ -290,7 +290,9 @@ err:
 
 
 /* tree bucket */
-
+/*
+ * OyTao:
+ */
 static int height(int n) {
 	int h = 0;
 	while ((n & 1) == 0) {
@@ -302,6 +304,7 @@ static int height(int n) {
 static int on_right(int n, int h) {
 	return n & (1 << (h+1));
 }
+
 static int parent(int n)
 {
 	int h = height(n);
@@ -311,6 +314,9 @@ static int parent(int n)
 		return n + (1<<h);
 }
 
+/* 
+ * OyTao: 根据item size计算树的高度.
+ */
 static int calc_depth(int size)
 {
 	if (size == 0) {
@@ -768,8 +774,12 @@ int crush_add_tree_bucket_item(struct crush_bucket_tree *bucket, int item, int w
 	int j;
 	void *_realloc = NULL;
 
+	/* OyTao: 根据最新的depth计算所有的node 个数 */
 	bucket->num_nodes = 1 << depth;
 
+	/* 
+	 * OyTao:需要重新分配items,perm,node_weight 
+	 */
 	if ((_realloc = realloc(bucket->h.items, sizeof(__s32)*newsize)) == NULL) {
 		return -ENOMEM;
 	} else {
@@ -785,6 +795,7 @@ int crush_add_tree_bucket_item(struct crush_bucket_tree *bucket, int item, int w
 	} else {
 		bucket->node_weights = _realloc;
 	}
+
 	
 	node = crush_calc_tree_node(newsize-1);
 	bucket->node_weights[node] = weight;
@@ -920,6 +931,11 @@ int crush_bucket_add_item(struct crush_map *map,
 
 /************************************************/
 
+/* 
+ * OyTao:
+ * uniform bucket remove item
+ * 在bucket中找到对应的item,将后续的item往前移动.
+ */
 int crush_remove_uniform_bucket_item(struct crush_bucket_uniform *bucket, int item)
 {
 	unsigned i, j;
@@ -932,14 +948,18 @@ int crush_remove_uniform_bucket_item(struct crush_bucket_uniform *bucket, int it
 	if (i == bucket->h.size)
 		return -ENOENT;
 
+	/* OyTao: 往前移动items */
 	for (j = i; j < bucket->h.size; j++)
 		bucket->h.items[j] = bucket->h.items[j+1];
 	newsize = --bucket->h.size;
+
+	/* OyTao: 更新bucket中的weight */
 	if (bucket->item_weight < bucket->h.weight)
 		bucket->h.weight -= bucket->item_weight;
 	else
 		bucket->h.weight = 0;
 
+	/* OyTao: realloc items和perm内存空间 */
 	if ((_realloc = realloc(bucket->h.items, sizeof(__s32)*newsize)) == NULL) {
 		return -ENOMEM;
 	} else {
@@ -953,32 +973,46 @@ int crush_remove_uniform_bucket_item(struct crush_bucket_uniform *bucket, int it
 	return 0;
 }
 
+/* 
+ * OyTao:
+ * list bucket remove item.
+ * 从删除的item开始直到尾部，更新所有的item的sum_weight.同时将后续的item往前移动.
+ */
 int crush_remove_list_bucket_item(struct crush_bucket_list *bucket, int item)
 {
 	unsigned i, j;
 	int newsize;
 	unsigned weight;
 
+	/* OyTao: 从items中删除@item */
 	for (i = 0; i < bucket->h.size; i++)
 		if (bucket->h.items[i] == item)
 			break;
 	if (i == bucket->h.size)
 		return -ENOENT;
 
+	/* 
+	 * OyTao: 从@item开始，后续的item往前移动，
+	 * 同时更新后续所有的item的sum_weights. 
+	 */
 	weight = bucket->item_weights[i];
 	for (j = i; j < bucket->h.size; j++) {
 		bucket->h.items[j] = bucket->h.items[j+1];
 		bucket->item_weights[j] = bucket->item_weights[j+1];
 		bucket->sum_weights[j] = bucket->sum_weights[j+1] - weight;
 	}
+
+	/* OyTao: 更新bucket的weight */
 	if (weight < bucket->h.weight)
 		bucket->h.weight -= weight;
 	else
 		bucket->h.weight = 0;
+
 	newsize = --bucket->h.size;
 	
 	void *_realloc = NULL;
 
+	/* OyTao: realloc items, perm, weights, sum_weights内存空间 */
 	if ((_realloc = realloc(bucket->h.items, sizeof(__s32)*newsize)) == NULL) {
 		return -ENOMEM;
 	} else {
@@ -999,6 +1033,7 @@ int crush_remove_list_bucket_item(struct crush_bucket_list *bucket, int item)
 	} else {
 		bucket->sum_weights = _realloc;
 	}
+
 	return 0;
 }
 
@@ -1016,6 +1051,10 @@ int crush_remove_tree_bucket_item(struct crush_bucket_tree *bucket, int item)
 		if (bucket->h.items[i] != item)
 			continue;
 		
+		/* 
+		 * OyTao: 找到对应的@item对应的node_index, 将其weight更新为0
+		 * 同时循环更新parent的node_weights.
+		 */
 		node = crush_calc_tree_node(i);
 		weight = bucket->node_weights[node];
 		bucket->node_weights[node] = 0;
@@ -1025,15 +1064,19 @@ int crush_remove_tree_bucket_item(struct crush_bucket_tree *bucket, int item)
 			bucket->node_weights[node] -= weight;
 			dprintk(" node %d weight %d\n", node, bucket->node_weights[node]);
 		}
+
+		/* OyTao: 更新bucket的weight */
 		if (weight < bucket->h.weight)
 			bucket->h.weight -= weight;
 		else
 			bucket->h.weight = 0;
 		break;
 	}
+
 	if (i == bucket->h.size)
 		return -ENOENT;
 
+	/* OyTao: 如果删除的是最后一个item, 则new_size-- */
 	newsize = bucket->h.size;
 	while (newsize > 0) {
 		int node = crush_calc_tree_node(newsize - 1);
@@ -1058,6 +1101,10 @@ int crush_remove_tree_bucket_item(struct crush_bucket_tree *bucket, int item)
 			bucket->h.perm = _realloc;
 		}
 
+		/*
+		 * OyTao: 如果输的高度变化，则depth - 1 
+		 * 所有的node weight不需要变动。
+		 */
 		olddepth = calc_depth(bucket->h.size);
 		newdepth = calc_depth(newsize);
 		if (olddepth != newdepth) {

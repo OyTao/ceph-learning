@@ -125,12 +125,22 @@ extern const char *crush_bucket_alg_name(int alg);
 		(1 << CRUSH_BUCKET_LIST) |	\
 		(1 << CRUSH_BUCKET_STRAW))
 
+/* 
+ * OyTao: bucket base 结构。
+ */
 struct crush_bucket {
 	__s32 id;        /* this'll be negative */
+
+	/* OyTao: type == 0,表示是最终的设备(osd) */
 	__u16 type;      /* non-zero; type=0 is reserved for devices */
+
 	__u8 alg;        /* one of CRUSH_BUCKET_* */
 	__u8 hash;       /* which hash function to use, CRUSH_HASH_* */
+
+	/* OyTao: 当前bucket的weight */
 	__u32 weight;    /* 16-bit fixed point */
+
+	/* OyTao: 当前的bucket中包含的子项 */
 	__u32 size;      /* num items */
 	__s32 *items;
 
@@ -138,16 +148,24 @@ struct crush_bucket {
 	 * cached random permutation: used for uniform bucket and for
 	 * the linear search fallback for the other bucket types.
 	 */
+	/* 
+	 * OyTao:
+	 * perm_x缓存的是上一次操作的PG的ID, 
+	 * perm_n表示perm数组中已经排好的个数，也是下一个需要排列的index 
+	 * perm是存储重新排列的子项的index数组
+	 */
 	__u32 perm_x;  /* @x for which *perm is defined */
 	__u32 perm_n;  /* num elements of *perm that are permuted/defined */
 	__u32 *perm;
 };
 
+/* OyTao: uniform bucket 结构 */
 struct crush_bucket_uniform {
 	struct crush_bucket h;
 	__u32 item_weight;  /* 16-bit fixed point; all items equally weighted */
 };
 
+/* OyTao: list bucket 结构 */
 struct crush_bucket_list {
 	struct crush_bucket h;
 	__u32 *item_weights;  /* 16-bit fixed point */
@@ -155,6 +173,7 @@ struct crush_bucket_list {
 				 of weights 0..i, inclusive */
 };
 
+/* OyTao: tree bucket 结构 */
 struct crush_bucket_tree {
 	struct crush_bucket h;  /* note: h.size is _tree_ size, not number of
 				   actual items */
@@ -162,12 +181,14 @@ struct crush_bucket_tree {
 	__u32 *node_weights;
 };
 
+/* OyTao: 已废弃 */
 struct crush_bucket_straw {
 	struct crush_bucket h;
 	__u32 *item_weights;   /* 16-bit fixed point */
 	__u32 *straws;         /* 16-bit fixed point */
 };
 
+/* OyTao: straw2 bucket  */
 struct crush_bucket_straw2 {
 	struct crush_bucket h;
 	__u32 *item_weights;   /* 16-bit fixed point */
@@ -237,6 +258,7 @@ extern void crush_destroy_bucket(struct crush_bucket *b);
 extern void crush_destroy_rule(struct crush_rule *r);
 extern void crush_destroy(struct crush_map *map);
 
+/* OyTao:根据node index @i,计算在tree node中的index */
 static inline int crush_calc_tree_node(int i)
 {
 	return ((i+1) << 1)-1;

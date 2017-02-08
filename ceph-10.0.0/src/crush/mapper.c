@@ -70,6 +70,13 @@ int crush_find_rule(const struct crush_map *map, int ruleset, int type, int size
  * Since this is expensive, we optimize for the r=0 case, which
  * captures the vast majority of calls.
  */
+
+/* 
+ * OyTao: bucket choose的参数
+ *		@bucket: 在@bucket中选择子项
+ *		@x: pg的ID
+ *		@r: 第几个副本
+ */
 /*
  * OyTao: 因为随机性，在size发生变化时候，即使x相同，perm数据也会重新排列，
  * 这样就意味着所有的映射都会发生变化，会造成很多的数据迁移
@@ -80,13 +87,19 @@ static int bucket_perm_choose(struct crush_bucket *bucket,
 	unsigned int pr = r % bucket->size;
 	unsigned int i, s;
 
-	/* OyTao: 初始化perm 数组 */
 	/* start a new permutation if @x has changed */
+	/* 
+	 * OyTao: bucket中的perm_x是一个缓存。缓存的是上一次从@bucket中分配的pg的ID
+	 * @x != perm_x,表示这次操作的pg已经更改， 或者是perm_n == 0, 第一次为@x pg
+	 * 分配，都需要重新排列perm数组
+	 */
 	if (bucket->perm_x != (__u32)x || bucket->perm_n == 0) {
 		dprintk("bucket %d new x=%d\n", bucket->id, x);
+
 		bucket->perm_x = x;
 
 		/* optimize common r=0 case */
+		/* OyTao: 如果@r == 0, 则直接根据hash32返回对应的index,同时填入perm数组*/
 		if (pr == 0) {
 			s = crush_hash32_3(bucket->hash, x, bucket->id, 0) %
 				bucket->size;
@@ -94,7 +107,13 @@ static int bucket_perm_choose(struct crush_bucket *bucket,
 			bucket->perm_n = 0xffff;   /* magic value, see below */
 			goto out;
 		}
-
+		
+		/* 
+		 * OyTao: 通常情况下，perm_n != 0; 如果perm_x !=x, 并且pr > 0,
+		 * 表示当前的perm数组已经不可用，需要重新计算.
+		 * 此时初始化perm数组。
+		 * 赋值@perm_n == 0
+		 */
 		for (i = 0; i < bucket->size; i++)
 			bucket->perm[i] = i;
 		bucket->perm_n = 0;
@@ -106,6 +125,9 @@ static int bucket_perm_choose(struct crush_bucket *bucket,
 		bucket->perm_n = 1;
 	}
 
+	/* 
+	 * OyTao: 此时@perm_x == x
+	 */
 	/* calculate permutation up to pr */
 	for (i = 0; i < bucket->perm_n; i++)
 		dprintk(" perm_choose have %d: %d\n", i, bucket->perm[i]);
@@ -146,7 +168,8 @@ static int bucket_uniform_choose(struct crush_bucket_uniform *bucket,
 }
 
 /* list */
-/* OyTao: 
+/* 
+ * OyTao: 
  * 每个item都保存了自己的weight, 同时也保存从index=0到自己的所有的weight总和，
  * 在size,以及item weight不变化的情况下，同样的x选择的item是一致的。
  * 在增加了新的item，会增加在尾部，这样只会更新新的item的sum_weights,其他的item
@@ -155,6 +178,8 @@ static int bucket_uniform_choose(struct crush_bucket_uniform *bucket,
  * 新的item与旧的item中间。
  * 如果是删除Item，则可能会影响很多item的sum_weights, 影响较大。
  * 缺点：在查找item时候，时间复杂度是O(n)
+ *
+ * List Bucket 计算得到的weight: bucket_id, index_replication, item_id, sum_weight
  */
 static int bucket_list_choose(struct crush_bucket_list *bucket,
 			      int x, int r)
@@ -162,9 +187,11 @@ static int bucket_list_choose(struct crush_bucket_list *bucket,
 	int i;
 
 	for (i = bucket->h.size-1; i >= 0; i--) {
+		/* OyTao:根据当前的item, 副本index(@r), bucket_id计算weight */
 		__u64 w = crush_hash32_4(bucket->h.hash, x, bucket->h.items[i],
 					 r, bucket->h.id);
 		w &= 0xffff;
+
 		dprintk("list_choose i=%d x=%d r=%d item %d weight %x "
 			"sw %x rand %llx",
 			i, x, r, bucket->h.items[i], bucket->item_weights[i],
@@ -215,17 +242,45 @@ static int terminal(int x)
  * OyTao:
  * tree bucket是借助一个node_weight实现树的结构的。
  *
- * node_weights  0  1  2  1  4  1  2  1 
- *					 \   /       \   /
- *					   2		   2
- *						\	      /
- *							 4
- * 上图中idx = 1, 3, 5, 7为真实的item节点，其他的为树中间节点。辅助查找。
+ * node_index	 0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
+ * node_weights  0  1  2  1  4  1  2  1  8  1  2  1  4  1  2  1 
+ *					 \   /       \   /		 \   /       \   /	
+ *					   2		   2    	   2		   2
+ *						\	      /     		\	      /
+ *							 4          			 4          
+ *								\					/
+ *								  \				  /
+ *                                  \			/
+ *                                      
+ *										  8
+ * 上图中idx = 1, 3, 5, 7, 9, 11, 13 15为真实的item节点，
+ * 其他的为树中间节点。辅助查找。
+ * 所有的真实item节点都是在奇数index上。
  *
  * tree bucket choose过程：
  * 首先从根节点开始，如果计算得到的hash指小于left, 则遍历左节点，否则遍历右节点。
- * hash值得计算（x, n r）
- * 如果n变动，则各个pg的hash值会发生变化，可能导致会有大量的迁移。
+ * 比较weight计算与以下因素有关：
+ * 1. node的index (这个不会发生变化)
+ * 2. replication的index 
+ * 3. pg_id 
+ * 4. node的weight(孩子weight之和）
+ *
+ * case 1: 增加或者删除item时候，树的depth不会发生变化；
+ * 当树的结构不发生变化时候，增加或者删除item，影响的只是变化的item到root节点
+ * 之前辅助节点的node_weight.
+ *    1) 增加节点, new_size++, 最会影响right sub tree的node_weights。
+ *       left sub tree 不会发生变化。数据只可能从left sub tree --> right sub tree.
+ *       
+ *    2) 删除节点，在输的depth不发生变化时候，只是更新了对应的node_weight.
+ *       如果删除的节点是在root的left sub tree, 数据可能是在left sub tree内部
+ *       迁移，也可能是从left --> right, 也可能是从right --> left.
+ *       如果删除的节点是在root的right sub tree,则数据迁移是从right --> left.
+ *
+ * case 2: 增加或者删除item时候，树的depth发生变化；
+ *    1) 增加节点，数据只能是从old item --> new item.
+ *    2) 删除节点，数据只能是从delete item --> all items.发生迁移的只有删除节点
+ *       上的数据。
+ *
  */
 
 static int bucket_tree_choose(struct crush_bucket_tree *bucket,
@@ -333,8 +388,10 @@ static __u64 crush_ln(unsigned int xin)
 /*
  * OyTao:
  * 查找过程需要遍历所有的item,在查找效率上比List，Tree差。
- * 如果新增加了一个item,改变的只有本身item的hash值, 
+ * case 1:如果新增加了一个item,改变的只有本身item的hash值, 
  * 数据迁移应该也只会在以前的节点与当前的节点中间。
+ * case 2: 删除一个的item. TODO 
+ *
  * 迁移的范围暂时未知。
  */ 
 

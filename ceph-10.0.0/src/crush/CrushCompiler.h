@@ -34,9 +34,13 @@ class CrushCompiler {
   typedef parse_tree_match_t::tree_iterator iter_t;
   typedef parse_tree_match_t::node_t node_t;
 
+  /* OyTao: @item_id, @id_item, item name <---> id */
   map<string, int> item_id;
   map<int, string> id_item;
+
+  /* OyTao: item_id --> item_weight */
   map<int, unsigned> item_weight;
+
   map<string, int> type_id;
   map<string, int> rule_id;
 
