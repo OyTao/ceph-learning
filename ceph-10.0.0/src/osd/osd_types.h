@@ -664,6 +664,12 @@ inline ostream& operator<<(ostream& out, const ceph_object_layout &ol)
 
 
 // compound rados version type
+/*
+ * OyTao: 
+ * @version: PG内每次更新操作递增
+ * @epoch: OSD Map状态发生变化时候递增
+ * @__pad: TODO
+ */
 class eversion_t {
 public:
   version_t version;
@@ -1774,8 +1780,13 @@ WRITE_CLASS_ENCODER(pg_hit_set_history_t)
  */
 struct pg_history_t {
   epoch_t epoch_created;       // epoch in which PG was created
+
+  /* OyTao: PG内所有的OSD都已经完成peering之后的epoch */
   epoch_t last_epoch_started;  // lower bound on last epoch started (anywhere, not necessarily locally)
+
+  /* OyTao: PG内所有的OSD的都已经完成数据一致 */
   epoch_t last_epoch_clean;    // lower bound on last epoch the PG was completely clean.
+
   epoch_t last_epoch_split;    // as parent
   epoch_t last_epoch_marked_full;  // pool or cluster
   
@@ -1786,8 +1797,13 @@ struct pg_history_t {
    * must have been a clean interval between e and now and that we cannot be
    * in the active set during the interval containing e.
    */
+
+  /* OyTao: 该PG从@same_up_since epoch之后，acting 序列没有发生变化 */
   epoch_t same_up_since;       // same acting set since
+
+  /* OyTao: 该PG从@same_interval_since之后，PG的acting和up序列没有发生变化 */
   epoch_t same_interval_since;   // same acting AND up set since
+
   epoch_t same_primary_since;  // same primary at least back through this epoch.
 
   eversion_t last_scrub;
@@ -1872,14 +1888,22 @@ inline ostream& operator<<(ostream& out, const pg_history_t& h) {
  *  - if last_complete >= log.bottom, then we know pg contents thru log.head.
  *    otherwise, we have no idea what the pg is supposed to contain.
  */
+/* OyTao: pg在OSD上的一些信息 */
 struct pg_info_t {
   spg_t pgid;
+  /* OyTao: 本地OSD已经完成的PG最新的操作(内存中) */
   eversion_t last_update;      ///< last object version applied to store.
+  
+  /* OyTao: 在所有的OSD上，都已经完成的该PG的操作(内存中) */
   eversion_t last_complete;    ///< last version pg was complete through.
+
+  /* OyTao: PG在本地完成peering过程之后，设置当时的epoch */
   epoch_t last_epoch_started;  ///< last epoch at which this pg started on this osd
+  
   
   version_t last_user_version; ///< last user object version applied to store
 
+  /* OyTao: 最老的日志对应的版本 */
   eversion_t log_tail;         ///< oldest log entry.
 
   hobject_t last_backfill;     ///< objects >= this and < last_complete may be missing
@@ -1889,6 +1913,7 @@ struct pg_info_t {
 
   pg_stat_t stats;
 
+  /* OyTao: pg 历史信息 */
   pg_history_t history;
   pg_hit_set_history_t hit_set;
 
@@ -1983,11 +2008,26 @@ ostream &operator<<(ostream &lhs, const pg_notify_t &notify);
  * pg_interval_t - information about a past interval
  */
 class OSDMap;
+
+/*
+ * OyTao: 描述一个interval
+ * 在一个interval，PG的acting set以及up set不会发生变化。
+ */
 struct pg_interval_t {
+  /* 
+   * OyTao: 在当前interval中,处于up和acting的OSD序列;
+   * @up 是根据crush map确定的osd set.
+   * @acting 是临时的osd set. _acting_primary osd可能不同于_up primary osd.
+   * 序列可能不一样。
+   */
   vector<int32_t> up, acting;
+  /* OyTao: @first: interval 开始的epoch; @last: interval结束的epoch */
   epoch_t first, last;
   bool maybe_went_rw;
+
+  /* OyTao; primary OSD ID */
   int32_t primary;
+
   int32_t up_primary;
 
   pg_interval_t()
@@ -2853,8 +2893,12 @@ class OSDSuperblock {
 public:
   uuid_d cluster_fsid, osd_fsid;
   int32_t whoami;    // my role in this fs.
+
+  /* OyTao: TODO */
   epoch_t current_epoch;             // most recent epoch
+  /* OyTao: TODO */
   epoch_t oldest_map, newest_map;    // oldest/newest maps we have.
+
   double weight;
 
   CompatSet compat_features;

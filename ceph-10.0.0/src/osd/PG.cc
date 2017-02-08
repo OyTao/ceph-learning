@@ -670,8 +670,15 @@ bool PG::needs_backfill() const
   return ret;
 }
 
+/*
+ * OyTao: 确定PG不一致start epoch和end epoch.
+ */
 bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end, epoch_t oldest_map)
 {
+  /* 
+   * OyTao: 如果history中记录了最后不一致的epoch，则end == 最后不一致的epoch,
+   * 否则则当前的epoch。
+   */
   if (info.history.same_interval_since) {
     *end = info.history.same_interval_since;
   } else {
@@ -680,6 +687,9 @@ bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end, epoch_t oldest_
   }
 
   // Do we already have the intervals we want?
+  /*
+   * OyTao: TODO 
+   */
   map<epoch_t,pg_interval_t>::const_iterator pif = past_intervals.begin();
   if (pif != past_intervals.end()) {
     if (pif->first <= info.history.last_epoch_clean) {
@@ -690,6 +700,13 @@ bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end, epoch_t oldest_
     *end = past_intervals.begin()->first;
   }
 
+  /* 
+   * OyTao: 
+   * history.epoch_created, pg创建的epoch.
+   * last_epoch_clean: PG上一次完成数据一致的epoch.
+   * oldest_map: 最老的epoch.
+   * start epoch取3个中最大值。
+   */ 
   *start = MAX(MAX(info.history.epoch_created,
 		   info.history.last_epoch_clean),
 	       oldest_map);
@@ -703,9 +720,16 @@ bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end, epoch_t oldest_
 }
 
 
+/*
+ * OyTao generate_past_intervals
+ * step 1: 确定要遍历的epoch范围（不一致）
+ * step 2: 遍历所有的epoch,记录该期间中所有的intervals. 
+ */
 void PG::generate_past_intervals()
 {
   epoch_t cur_epoch, end_epoch;
+
+  /* OyTao: 确定不一致的start epoch(@cur_epoch)，以及end epoch(@end_epoch) */
   if (!_calc_past_interval_range(&cur_epoch, &end_epoch,
       osd->get_superblock().oldest_map)) {
     if (info.history.same_interval_since == 0)
@@ -728,6 +752,12 @@ void PG::generate_past_intervals()
   dout(10) << __func__ << " over epochs " << cur_epoch << "-"
 	   << end_epoch << dendl;
   ++cur_epoch;
+
+  /* 
+   * OyTao:
+   * 遍历所有的epoch (@cur_epoch --> @end_epoch),
+   * 通过检查，在@past_intervals中记录该期间所有的interval。
+   */
   for (; cur_epoch <= end_epoch; ++cur_epoch) {
     int old_primary = primary;
     int old_up_primary = up_primary;
@@ -735,9 +765,12 @@ void PG::generate_past_intervals()
     old_up.swap(up);
     old_acting.swap(acting);
 
-	/* OyTao: get ancestor pgid  ??? */
     cur_map = osd->get_map(cur_epoch);
     pg_t pgid = get_pgid().pgid;
+
+	/* 
+	 * OyTao: TODO
+	 */
     if (last_map->get_pools().count(pgid.pool()))
       pgid = pgid.get_ancestor(last_map->get_pg_num(pgid.pool()));
 
@@ -746,6 +779,7 @@ void PG::generate_past_intervals()
     boost::scoped_ptr<IsPGRecoverablePredicate> recoverable(
       get_is_recoverable_predicate());
     std::stringstream debug;
+
 	/* OyTao: 
 	 * 1. check that last epoch and cur epoch are in same interval
 	 * 2. update past intervals if have new internval.
@@ -6957,6 +6991,13 @@ void PG::RecoveryState::Stray::exit()
 }
 
 /*--------GetInfo---------*/
+/*
+ * OyTao: 
+ * GetInfo主要有3个操作：
+ * step 1: 
+ * step 2:
+ * step 3:
+ */
 PG::RecoveryState::GetInfo::GetInfo(my_context ctx)
   : my_base(ctx),
     NamedState(context< RecoveryMachine >().pg->cct, "Started/Primary/Peering/GetInfo")

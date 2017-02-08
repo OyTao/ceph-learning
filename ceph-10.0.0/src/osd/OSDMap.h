@@ -71,8 +71,13 @@ using namespace std;
 struct osd_info_t {
   epoch_t last_clean_begin;  // last interval that ended with a clean osd shutdown
   epoch_t last_clean_end;
+
+  /* OyTao: */ 
   epoch_t up_from;   // epoch osd marked up
+
+  /* OyTao: */
   epoch_t up_thru;   // lower bound on actual osd death (if > up_from)
+
   epoch_t down_at;   // upper bound on actual osd death (if > up_from)
   epoch_t lost_at;   // last epoch we decided data was "lost"
   

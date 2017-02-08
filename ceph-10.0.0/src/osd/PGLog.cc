@@ -180,6 +180,13 @@ void PGLog::trim(
   }
 }
 
+/*
+ * OyTao:
+ * @oinfo: 远程节点的pg_info_t
+ * @olog: 远程节点的pg_log_t
+ * @omissing: 远程节点的missing信息
+ * @from: 远程节点
+ */
 void PGLog::proc_replica_log(
   ObjectStore::Transaction& t,
   pg_info_t &oinfo, const pg_log_t &olog, pg_missing_t& omissing,
@@ -188,16 +195,33 @@ void PGLog::proc_replica_log(
   dout(10) << "proc_replica_log for osd." << from << ": "
 	   << oinfo << " " << olog << " " << omissing << dendl;
 
+  /* 
+   * OyTao: 没有重叠部分
+   * olog.tail -------- olog.head
+   *                               log.tail ---------- log.head
+   */
   if (olog.head < log.tail) {
     dout(10) << __func__ << ": osd." << from << " does not overlap, not looking "
 	     << "for divergent objects" << dendl;
     return;
   }
+
+  /* 
+   * OyTao: 没有分歧日志
+   * olog.tail ----------- olog.head
+   *    ------------------ log.head
+   */
   if (olog.head == log.head) {
     dout(10) << __func__ << ": osd." << from << " same log head, not looking "
 	     << "for divergent objects" << dendl;
     return;
   }
+  
+  /*
+   * OyTao:
+   * olog.tail -------------------- olog.head
+   *     log.tail --------------
+   */
   assert(olog.head >= log.tail);
 
   /*

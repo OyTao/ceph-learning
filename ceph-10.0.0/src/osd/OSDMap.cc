@@ -1514,6 +1514,9 @@ void OSDMap::_remove_nonexistent_osds(const pg_pool_t& pool,
   }
 }
 
+/* 
+ * OyTao：根据PG查找对应的OSD。
+ */
 int OSDMap::_pg_to_osds(const pg_pool_t& pool, pg_t pg,
                         vector<int> *osds, int *primary,
 			ps_t *ppps) const
@@ -1543,6 +1546,9 @@ int OSDMap::_pg_to_osds(const pg_pool_t& pool, pg_t pg,
 }
 
 // pg -> (up osd list)
+/*
+ * OyTao: 把@raw中的OSD 不存在或者down的OSD去除
+ */
 void OSDMap::_raw_to_up_osds(const pg_pool_t& pool, const vector<int>& raw,
                              vector<int> *up, int *primary) const
 {
@@ -1624,12 +1630,16 @@ void OSDMap::_apply_primary_affinity(ps_t seed,
   }
 }
 
+/* 
+ * OyTao: TODO 
+ */
 void OSDMap::_get_temp_osds(const pg_pool_t& pool, pg_t pg,
                             vector<int> *temp_pg, int *temp_primary) const
 {
   pg = pool.raw_pg_to_pg(pg);
   map<pg_t,vector<int32_t> >::const_iterator p = pg_temp->find(pg);
   temp_pg->clear();
+
   if (p != pg_temp->end()) {
     for (unsigned i=0; i<p->second.size(); i++) {
       if (!exists(p->second[i]) || is_down(p->second[i])) {
@@ -1643,6 +1653,7 @@ void OSDMap::_get_temp_osds(const pg_pool_t& pool, pg_t pg,
       }
     }
   }
+  
   map<pg_t,int32_t>::const_iterator pp = primary_temp->find(pg);
   *temp_primary = -1;
   if (pp != primary_temp->end()) {
@@ -1685,8 +1696,10 @@ void OSDMap::pg_to_raw_up(pg_t pg, vector<int> *up, int *primary) const
   _apply_primary_affinity(pps, *pool, up, primary);
 }
   
-/*
- * OyTao: get up osd set, active osds set, primary up osd, and primary active osd.
+
+/* 
+ * OyTao: 从当前的osdmap中获取对应的acting set, up set等信息.
+ * acting set是临时的set.
  */
 void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_primary,
                                    vector<int> *acting, int *acting_primary) const
@@ -1706,21 +1719,35 @@ void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_prim
       *acting_primary = -1;
     return;
   }
+
   vector<int> raw;
   vector<int> _up;
   vector<int> _acting;
   int _up_primary;
   int _acting_primary;
   ps_t pps;
-  /* OyTao: get all up osds based on the crush and first as primary */
+  /* 
+   * OyTao: get all up osds based on the crush and first as primary,
+   * @_up_primary是primary OSD
+   */
   _pg_to_osds(*pool, pg, &raw, &_up_primary, &pps);
+
+  /* 
+   * OyTao: @_up是@raw中取出不存在或者down的osd set, 
+   * @_up_primary是@_up中第一个osd
+   */
   _raw_to_up_osds(*pool, raw, &_up, &_up_primary);
 
   /* OyTao: update primary based on affinity */
   _apply_primary_affinity(pps, *pool, &_up, &_up_primary);
 
-  /* OyTao: get _acting and _acting_primary from pg_temp and primary_temp */
+  /* 
+   * OyTao: get _acting and _acting_primary from pg_temp and primary_temp
+   * @_acting 可能与_up不一致，有可能_acting_primary不为_up_primary,
+   * 因为_up_primary数据不全，无法承担primary OSD 功能。
+   */
   _get_temp_osds(*pool, pg, &_acting, &_acting_primary);
+
   if (_acting.empty()) {
     _acting = _up;
     if (_acting_primary == -1) {
@@ -1728,6 +1755,7 @@ void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_prim
     }
   }
 
+  /* OyTao: 赋值 */
   if (up)
     up->swap(_up);
   if (up_primary)
@@ -1736,6 +1764,7 @@ void OSDMap::_pg_to_up_acting_osds(const pg_t& pg, vector<int> *up, int *up_prim
     acting->swap(_acting);
   if (acting_primary)
     *acting_primary = _acting_primary;
+
 }
 
 int OSDMap::calc_pg_rank(int osd, const vector<int>& acting, int nrep)

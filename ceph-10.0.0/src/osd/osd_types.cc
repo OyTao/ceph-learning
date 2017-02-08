@@ -2782,7 +2782,9 @@ bool pg_interval_t::is_new_interval(
 }
 
 /*
- * OyTao: could have gone active
+ * OyTao: 
+ * 根据old acting/up set等信息，确定是否同一个interval，如果不是，则将old
+ * 作为一个新的interval添加到past_intervals.同时确定该interval是否可能进行过IO。
  */
 bool pg_interval_t::check_new_interval(
   int old_acting_primary,
@@ -2838,15 +2840,28 @@ bool pg_interval_t::check_new_interval(
       if (*p != CRUSH_ITEM_NONE)
 	++num_acting;
 
-	/* OyTao: convert old acting to old acting shards */
+	/* OyTao: convert old acting to old acting shards TODO  */
     const pg_pool_t& old_pg_pool = lastmap->get_pools().find(pgid.pool())->second;
     set<pg_shard_t> old_acting_shards;
     old_pg_pool.convert_to_pg_shards(old_acting, &old_acting_shards);
 
+	/*
+	 * OyTao: 需要根据当前的interval判断这个interval期间是否可能进行过写操作
+	 * case 1: 如果primary OSD设置了up_thru(up_thru之后pg就处于activate状态，
+	 *         activate状态之后就可以处理IO), 并且up_thru > interval.first
+	 *         ,则该interval期间内，可能进行过写操作。
+	 *
+	 * case 2: 因为past_interval是从last_epoch_clean开始的，但是interval的first
+	 *       epoch可能不是真正的first epoch.因为osd map没有保存last_epoch_clean
+	 *       之前的osd map. 所以如果last_epoch_clean >= first_epoch,
+	 *       则该PG后续可能进行了IO。
+	 */
     if (num_acting &&
 	i.primary != -1 &&
 	num_acting >= old_pg_pool.min_size &&
         (*could_have_gone_active)(old_acting_shards)) {
+
+		/* OyTao: Debug Info */
       if (out)
 	*out << "generate_past_intervals " << i
 	     << ": not rw,"
@@ -2854,10 +2869,15 @@ bool pg_interval_t::check_new_interval(
 	     << " up_from " << lastmap->get_up_from(i.primary)
 	     << " last_epoch_clean " << last_epoch_clean
 	     << std::endl;
+
+	  /* OyTao: case 1 */ 
       if (lastmap->get_up_thru(i.primary) >= i.first &&
 	  lastmap->get_up_from(i.primary) <= i.first) {
-	/* OyTao; maybe have been rw in this interval */
 	i.maybe_went_rw = true;
+	
+	/* 
+	 * OyTao: Debug Info
+	 */
 	if (out)
 	  *out << "generate_past_intervals " << i
 	       << " : primary up " << lastmap->get_up_from(i.primary)
@@ -2866,6 +2886,7 @@ bool pg_interval_t::check_new_interval(
 	       << std::endl;
       } else if (last_epoch_clean >= i.first &&
 		 last_epoch_clean <= i.last) {
+	/* OyTao: case 2 */
 	// If the last_epoch_clean is included in this interval, then
 	// the pg must have been rw (for recovery to have completed).
 	// This is important because we won't know the _real_
@@ -2874,6 +2895,7 @@ bool pg_interval_t::check_new_interval(
 	// maybe_went_rw false depending on the relative up_thru vs
 	// last_epoch_clean timing.
 	i.maybe_went_rw = true;
+
 	if (out)
 	  *out << "generate_past_intervals " << i
 	       << " : includes last_epoch_clean " << last_epoch_clean
