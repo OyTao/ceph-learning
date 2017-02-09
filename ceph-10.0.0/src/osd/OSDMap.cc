@@ -1260,6 +1260,9 @@ void OSDMap::remove_down_temps(CephContext *cct,
   }
 }
 
+/*
+ * OyTao: TODO
+ */
 int OSDMap::apply_incremental(const Incremental &inc)
 {
   new_blacklist_entries = false;

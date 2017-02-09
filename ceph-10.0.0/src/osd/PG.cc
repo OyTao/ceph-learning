@@ -320,15 +320,25 @@ void PG::proc_replica_log(
   peer_missing[from].swap(omissing);
 }
 
+/*
+ * OyTao: primary OSD 处理收到其他OSD回复的pg_info_t,
+ * 如果收到的pg_info是新的并且有效的，返回true;否则返回false.
+ */
 bool PG::proc_replica_info(
   pg_shard_t from, const pg_info_t &oinfo, epoch_t send_epoch)
 {
   map<pg_shard_t, pg_info_t>::iterator p = peer_info.find(from);
+
+  /* 
+   * OyTao: 如果primary已经收到该OSD的ACK信息，并且pg_info中的last_update一致，
+   * 则直接返回
+   */
   if (p != peer_info.end() && p->second.last_update == oinfo.last_update) {
     dout(10) << " got dup osd." << from << " info " << oinfo << ", identical to ours" << dendl;
     return false;
   }
 
+  /* OyTao: 如果osd在@send_epoch时处于not up状态， 则不处理 */
   if (!get_osdmap()->has_been_up_since(from.osd, send_epoch)) {
     dout(10) << " got info " << oinfo << " from down osd." << from
 	     << " discarding" << dendl;
@@ -337,19 +347,27 @@ bool PG::proc_replica_info(
 
   dout(10) << " got osd." << from << " " << oinfo << dendl;
   assert(is_primary());
+
+  /* OyTao:将收到ACK信息的OSD加入到peer_info数组中 */
   peer_info[from] = oinfo;
+
+  /* OyTao: TODO  */
   might_have_unfound.insert(from);
   
+  /* OyTao: scrub TODO */
+  unreg_next_scrub();
+
   /* 
    * OyTao: merge pg history info with @oinfo 
    * update(last_epoch_started, last_epoch_clean, last_epoch* as max-values)
    */
-  unreg_next_scrub();
   if (info.history.merge(oinfo.history))
     dirty_info = true;
+
   reg_next_scrub();
   
   // stray?
+  /* OyTao: 如果@from OSD不属于acting or up set,则加入stray_set. */
   if (!is_up(from) && !is_acting(from)) {
     dout(10) << " osd." << from << " has stray content: " << oinfo << dendl;
     stray_set.insert(from);
@@ -905,6 +923,9 @@ bool PG::all_unfound_are_queried_or_lost(const OSDMapRef osdmap) const
   return true;
 }
 
+/* 
+ * OyTao: 从past intervals中，构建需要获取pg_info的OSD列表。 
+ */
 void PG::build_prior(std::unique_ptr<PriorSet> &prior_set)
 {
   if (1) {
@@ -915,6 +936,10 @@ void PG::build_prior(std::unique_ptr<PriorSet> &prior_set)
       assert(info.history.last_epoch_started >= it->second.history.last_epoch_started);
     }
   }
+
+  /*
+   * OyTao: 构建一个prior Set.(probe/down列表）
+   */
   prior_set.reset(
     new PriorSet(
       pool.info.ec_pool(),
@@ -925,15 +950,23 @@ void PG::build_prior(std::unique_ptr<PriorSet> &prior_set)
       acting,
       info,
       this));
+
   PriorSet &prior(*prior_set.get());
 				 
+  /*
+   * OyTao: 如果在past_interval中存在一个Interval，无法恢复数据，
+   * 则设置PG_STATE_DOWN
+   */
   if (prior.pg_down) {
     state_set(PG_STATE_DOWN);
   }
+
   /*
    * OyTao:
    * if OSD B current up_thru is 2, the same_interval_since is 4.
    * need to update up_thru of OSD B to 4.
+   * 如果当前PG所在的本地OSD的up_thru < history.same_interval_since值，
+   * 则需要更新up_thru值。因为在same_interval_since已经完成数据的同步。
    */
   if (get_osdmap()->get_up_thru(osd->whoami) < info.history.same_interval_since) {
     dout(10) << "up_thru " << get_osdmap()->get_up_thru(osd->whoami)
@@ -946,6 +979,9 @@ void PG::build_prior(std::unique_ptr<PriorSet> &prior_set)
 	     << ", all is well" << dendl;
     need_up_thru = false;
   }
+
+
+  /* OyTao: 将prior_set中probe列表复制到@probe_targets of PG */
   set_probe_targets(prior_set->probe);
 }
 
@@ -6994,9 +7030,11 @@ void PG::RecoveryState::Stray::exit()
 /*
  * OyTao: 
  * GetInfo主要有3个操作：
- * step 1: 
- * step 2:
- * step 3:
+ * step 1: 确定要扫描的start epoch---> end epoch. 生成past intervals. 
+ * step 2: 根据past intervals, 构建要获取pg_info的OSD info.
+ *         如果past intervals中存在一个不能进行数据恢复的interval,则设置PG状态
+ *         为PG_STATE_DOWN。
+ * step 3: 向past intervals中至今up的OSDs获取pg_info. 
  */
 PG::RecoveryState::GetInfo::GetInfo(my_context ctx)
   : my_base(ctx),
@@ -7006,7 +7044,7 @@ PG::RecoveryState::GetInfo::GetInfo(my_context ctx)
 
   PG *pg = context< RecoveryMachine >().pg;
   /*
-   * OyTao:
+   * OyTao: step1
    * generate past intervals 
    * 一个Interval内部，该PG内部的OSD没有发生变化。
    */
@@ -7015,15 +7053,16 @@ PG::RecoveryState::GetInfo::GetInfo(my_context ctx)
 
   assert(pg->blocked_by.empty());
 
-  /* OyTao:
+  /* 
+   * OyTao: step2 
    * get probe osds set
-   * 1. current up and active osd sets.
-   * 2. past intervals up osd osds.
    */
   if (!prior_set.get())
     pg->build_prior(prior_set);
 
   pg->reset_min_peer_features();
+  
+  /* OyTao: step 3 */
   get_infos();
   if (peer_info_requested.empty() && !prior_set->pg_down) {
     post_event(GotInfo());
@@ -7040,13 +7079,18 @@ void PG::RecoveryState::GetInfo::get_infos()
        it != prior_set->probe.end();
        ++it) {
     pg_shard_t peer = *it;
+
+	/* OyTao: 如果是自己，则忽略 */
     if (peer == pg->pg_whoami) {
       continue;
     }
+
+	/* OyTao: @peer_info是已经收到ACK的OSD set */
     if (pg->peer_info.count(peer)) {
       dout(10) << " have osd." << peer << " info " << pg->peer_info[peer] << dendl;
       continue;
     }
+
     if (peer_info_requested.count(peer)) {
       dout(10) << " already requested info from osd." << peer << dendl;
       pg->blocked_by.insert(peer.osd);
@@ -7054,6 +7098,8 @@ void PG::RecoveryState::GetInfo::get_infos()
       dout(10) << " not querying info from down osd." << peer << dendl;
     } else {
       dout(10) << " querying info from osd." << peer << dendl;
+
+	  /* OyTao: 向@peer OSD 发送GET_INFO 信息 */
       context< RecoveryMachine >().send_query(
 	peer, pg_query_t(pg_query_t::INFO,
 			 it->shard, pg->pg_whoami.shard,
@@ -7064,6 +7110,7 @@ void PG::RecoveryState::GetInfo::get_infos()
     }
   }
 
+  /* OyTao: TODO */
   pg->publish_stats_to_osd();
 }
 
@@ -7082,7 +7129,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 
   epoch_t old_start = pg->info.history.last_epoch_started;
 
-  /* OyTao: if this info is good */
+  /* OyTao: primary OSD收到合法的pg_info ACK info */
   if (pg->proc_replica_info(
 	infoevt.from, infoevt.notify.info, infoevt.notify.epoch_sent)) {
     // we got something new ...
@@ -7091,7 +7138,6 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 	/* OyTao: 
 	 * if primary osd history info merge with @infoevt in proc_replica_info,
 	 * rebuild prior and get infos.
-	 * Why? Maybe shutdown in peering process.
 	 */
     if (old_start < pg->info.history.last_epoch_started) {
       dout(10) << " last_epoch_started moved forward, rebuilding prior" << dendl;
@@ -7111,6 +7157,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
       }
       get_infos();
     }
+
     dout(20) << "Adding osd: " << infoevt.from.osd << " peer features: "
       << hex << infoevt.features << dec << dendl;
     pg->apply_peer_features(infoevt.features);
@@ -7131,11 +7178,13 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 	     ++p) {
 	  if (p->first < pg->info.history.last_epoch_started)
 	    break;
+
 	  /*
 	   * OyTao: maybe have rw in this interval.
 	   */
 	  if (!p->second.maybe_went_rw)
 	    continue;
+
 	  pg_interval_t& interval = p->second;
 	  dout(10) << " last maybe_went_rw interval was " << interval << dendl;
 	  OSDMapRef osdmap = pg->get_osdmap();
@@ -7184,6 +7233,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
       post_event(GotInfo());
     }
   }
+
   return discard_event();
 }
 
@@ -7683,6 +7733,9 @@ void PG::RecoveryState::RecoveryMachine::log_exit(const char *state_name, utime_
 #undef dout_prefix
 #define dout_prefix (*_dout << (debug_pg ? debug_pg->gen_prefix() : string()) << " PriorSet: ")
 
+/*
+ * OyTao: TODO 
+ */
 PG::PriorSet::PriorSet(bool ec_pool,
 		       IsPGRecoverablePredicate *c,
 		       const OSDMap &osdmap,
@@ -7740,10 +7793,14 @@ PG::PriorSet::PriorSet(bool ec_pool,
   // but because we want their pg_info to inform choose_acting(), and
   // so that we know what they do/do not have explicitly before
   // sending them any new info/logs/whatever.
+  
+  /* OyTao: 将acting set 中的OSD 都加入到probe列表 */
   for (unsigned i=0; i<acting.size(); i++) {
     if (acting[i] != CRUSH_ITEM_NONE)
       probe.insert(pg_shard_t(acting[i], ec_pool ? shard_id_t(i) : shard_id_t::NO_SHARD));
   }
+
+  /* OyTao: 将up set中的OSD都加入到probe列表 */ 
   // It may be possible to exlude the up nodes, but let's keep them in
   // there for now.
   for (unsigned i=0; i<up.size(); i++) {
@@ -7751,12 +7808,26 @@ PG::PriorSet::PriorSet(bool ec_pool,
       probe.insert(pg_shard_t(up[i], ec_pool ? shard_id_t(i) : shard_id_t::NO_SHARD));
   }
 
+  /*
+   * OyTao: 遍历所有的past intervals.
+   * 将interval中至今up的osd加入probe中。
+   * 将interval中至今down的osd加入到down中。
+   * 同时，如果在interval没有down的osd加入到临时的up_now列表中，用来判断该
+   * interval是否可以进行数据恢复，如果不可以，在设置pg_down = true,
+   * 同时设置该interval被blocked，需要等待的epoch.
+   */
   for (map<epoch_t,pg_interval_t>::const_reverse_iterator p = past_intervals.rbegin();
        p != past_intervals.rend();
        ++p) {
     const pg_interval_t &interval = p->second;
     dout(10) << "build_prior " << interval << dendl;
 
+	/* 
+	 * OyTao:
+	 * case 1:如果interval在history.last_epoch_started之前，不care.
+	 * case 2:如果interval中的acting为空，忽略；
+	 * case 3:如果该interval中没有IO(没有用户IO），忽略；
+	 */
     if (interval.last < info.history.last_epoch_started)
       break;  // we don't care
 
@@ -7773,12 +7844,16 @@ PG::PriorSet::PriorSet(bool ec_pool,
     bool any_down_now = false;  // any candidates down now (that might have useful data)
 
     // consider ACTING osds
+	/* OyTao: 为什么不考虑up set osds */
     for (unsigned i=0; i<interval.acting.size(); i++) {
+
+	  /* OyTao: 找到acting中的primary OSD */
       int o = interval.acting[i];
       if (o == CRUSH_ITEM_NONE)
 	continue;
       pg_shard_t so(o, ec_pool ? shard_id_t(i) : shard_id_t::NO_SHARD);
 
+	  /* OyTao: 获取primary OSD对应的osd_info */
       const osd_info_t *pinfo = 0;
       if (osdmap.exists(o))
 	pinfo = &osdmap.get_info(o);
@@ -7788,15 +7863,21 @@ PG::PriorSet::PriorSet(bool ec_pool,
 	probe.insert(so);
 	up_now.insert(so);
       } else if (!pinfo) {
+	/* OyTao: @osdmap中不存在@o osd, 则将@o osd添加到down列表中 */
 	dout(10) << "build_prior  prior osd." << o << " no longer exists" << dendl;
 	down.insert(o);
       } else if (pinfo->lost_at > interval.first) {
+	/* 
+	 * OyTao: 如果@o osd但钱不是up状态，但是在interval期间是出于up状态，
+	 * 则加入到up_now列表中
+	 */
 	dout(10) << "build_prior  prior osd." << o << " is down, but lost_at " << pinfo->lost_at << dendl;
 	up_now.insert(so);
 	down.insert(o);
       } else {
 	dout(10) << "build_prior  prior osd." << o << " is down" << dendl;
 	down.insert(o);
+	/* OyTao: @any_down_now,表示有osd在interval期间down. */
 	any_down_now = true;
       }
     }
@@ -7804,6 +7885,12 @@ PG::PriorSet::PriorSet(bool ec_pool,
     // if not enough osds survived this interval, and we may have gone rw,
     // then we need to wait for one of those osds to recover to
     // ensure that we haven't lost any information.
+	/*
+	 * OyTao: pcontdec函数，主要是检查在interval期间是否可以通过up_now osd set
+	 * 进行修复。
+	 * 对于ReplicatedPG对应的实现是RPCRecPred. 至少要熬正有一个处于up状态的OSD。
+	 * 对于ErasureCode类型的PG，至少需要有n个处于up状态的OSD。
+	 */
     if (!(*pcontdec)(up_now) && any_down_now) {
       // fixme: how do we identify a "clean" shutdown anyway?
       dout(10) << "build_prior  possibly went active+rw, insufficient up;"

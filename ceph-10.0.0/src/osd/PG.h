@@ -493,10 +493,20 @@ public:
 
   // [primary only] content recovery state
  protected:
+  /* 
+   * OyTao: 用来获取需要获取pg_info的OSD集合.
+   * @probe: 当前的acting set, up set, 以及past interval中岛目前仍然up的osd set.
+   * @down: past intervals中的OSD，在当前已经不存在或者已经down. 
+   */
   struct PriorSet {
     const bool ec_pool;
+	/*
+	 * OyTao:
+	 */
     set<pg_shard_t> probe; /// current+prior OSDs we need to probe.
     set<int> down;  /// down osds that would normally be in @a probe and might be interesting.
+
+	/* OyTao: */
     map<int, epoch_t> blocked_by;  /// current lost_at values for any OSDs in cur set for which (re)marking them lost would affect cur set
 
     bool pg_down;   /// some down osds are included in @a cur; the DOWN pg state bit should be set.
@@ -1498,6 +1508,7 @@ public:
 	return state->rctx->transaction;
       }
 
+	  /* OyTao: send_query只是将@query放到context的query_map上 */
       void send_query(pg_shard_t to, const pg_query_t &query) {
 	assert(state->rctx);
 	assert(state->rctx->query_map);

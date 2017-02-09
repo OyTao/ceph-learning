@@ -68,7 +68,9 @@ using namespace std;
  * but those writes will still be lost (the divergent objects will be
  * thrown out).
  */
+/* OyTao: TODO */
 struct osd_info_t {
+
   epoch_t last_clean_begin;  // last interval that ended with a clean osd shutdown
   epoch_t last_clean_end;
 

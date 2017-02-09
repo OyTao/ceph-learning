@@ -170,6 +170,7 @@ void PGMap::Incremental::generate_test_instances(list<PGMap::Incremental*>& o)
 
 // --
 
+/* OyTao:  TODO */
 void PGMap::apply_incremental(CephContext *cct, const Incremental& inc)
 {
   assert(inc.version == version+1);

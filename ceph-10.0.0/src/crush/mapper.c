@@ -211,6 +211,12 @@ static int bucket_list_choose(struct crush_bucket_list *bucket,
 
 
 /* (binary) tree */
+/*
+ * OyTao: tree bucket辅助函数。
+ * height: (计算node index在树中的高度)
+ * left： (计算node index的左孩子的index)
+ * right: (计算node index的右孩子的index)
+ */
 static int height(int n)
 {
 	int h = 0;

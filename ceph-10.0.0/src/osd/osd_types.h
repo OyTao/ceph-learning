@@ -1818,6 +1818,11 @@ struct pg_history_t {
       last_epoch_marked_full(0),
       same_up_since(0), same_interval_since(0), same_primary_since(0) {}
   
+  /* 
+   * OyTao: history pg_info merge.
+   * 将当前pg_history_t中的信息与@other比较，更新为最大的;
+   * 同时设置modified = true
+   */
   bool merge(const pg_history_t &other) {
     // Here, we only update the fields which cannot be calculated from the OSDmap.
     bool modified = false;
@@ -1975,7 +1980,11 @@ inline ostream& operator<<(ostream& out, const pg_info_t& pgi)
   return out;
 }
 
+/*
+ * OyTao: pg_info的ACK信息 
+ */
 struct pg_notify_t {
+
   epoch_t query_epoch;
   epoch_t epoch_sent;
   pg_info_t info;
@@ -2000,6 +2009,8 @@ struct pg_notify_t {
   void dump(Formatter *f) const;
   static void generate_test_instances(list<pg_notify_t*> &o);
 };
+
+
 WRITE_CLASS_ENCODER(pg_notify_t)
 ostream &operator<<(ostream &lhs, const pg_notify_t &notify);
 
@@ -2155,6 +2166,7 @@ struct pg_query_t {
       to(to), from(from) {
     assert(t != LOG);
   }
+
   pg_query_t(
     int t,
     shard_id_t to,
@@ -2174,6 +2186,7 @@ struct pg_query_t {
   static void generate_test_instances(list<pg_query_t*>& o);
 };
 WRITE_CLASS_ENCODER_FEATURES(pg_query_t)
+
 
 inline ostream& operator<<(ostream& out, const pg_query_t& q) {
   out << "query(" << q.get_type_name() << " " << q.since;
