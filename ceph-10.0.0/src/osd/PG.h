@@ -1937,6 +1937,7 @@ public:
 
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< QueryState >,
+	/* OyTao: 收到GotInfo之后转到GetLog状态 */
 	boost::statechart::transition< GotInfo, GetLog >,
 	boost::statechart::custom_reaction< MNotifyRec >
 	> reactions;
