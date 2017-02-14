@@ -1032,6 +1032,24 @@ void PG::clear_primary_state()
  */
 /*
  * OyTao: 选取权威日志
+ * 当前所有的pg_info_t所在的OSD都是参与了past intervals，并且现在UP的OSD.
+ * 权威日志应该是其中拥有最新/最多的日志。
+ * 所有选择的规则：
+ * 1) 最新的日志 
+ * 2) 选择日志最长
+ * 3) 选择当前的OSD
+ *
+ * 首先在所有的pg_info中，
+ * 根据pg_info.history以及pg_info 找出最大的last_epoch_stated.
+ * (max_last_epoch_started_found)
+ * 然后在这拥有最大的last_epoch_started的OSDs的中找出最小的last_updates.
+ * (min_last_update_acceptable)
+ *
+ * @best.last_upate >= min_last_update_acceptable
+ * @best.last_epoch_started >= max_last_epoch_started_found
+ * @best.completed
+ *
+ * 在符合了上述条件中的OSD,再根据上述选择的规则选择权威日志所在的OSD
  */
 ap<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
 			const map<pg_shard_t, pg_info_t> &infos) const
@@ -1042,7 +1060,6 @@ ap<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
 	eversion_t min_last_update_acceptable = eversion_t::max();
 	epoch_t max_last_epoch_started_found = 0;
 
-	/* OyTao: get @max_last_epoch_started_found in all infos */
 	for (map<pg_shard_t, pg_info_t>::const_iterator i = infos.begin();
 				i != infos.end();
 				++i) {
@@ -1090,10 +1107,12 @@ ap<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
 		// Disquality anyone who is incomplete (not fully backfilled)
 		if (p->second.is_incomplete())
 		  continue;
+
 		if (best == infos.end()) {
 			best = p;
 			continue;
 		}
+
 		// Prefer newer last_update
 		if (pool.info.require_rollback()) {
 			if (p->second.last_update > best->second.last_update)
@@ -1110,6 +1129,7 @@ ap<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
 				continue;
 			}
 		}
+
 
 		// Prefer longer tail
 		if (p->second.log_tail > best->second.log_tail) {
@@ -1237,6 +1257,13 @@ void PG::calc_replicated_acting(
 
 	// select primary
 	map<pg_shard_t,pg_info_t>::const_iterator primary;
+	/* 
+	 * OyTao:
+	 * 优先选择up_primary作为primary OSD.
+	 * 如果@up_primary的log与权威日志有重叠 (last_update >= log.tail),
+	 * 后续可以通过日志记录恢复。
+	 * 并且@up_primary是completed状态。
+	 */
 	if (up.size() &&
 				!all_info.find(up_primary)->second.is_incomplete() &&
 				all_info.find(up_primary)->second.last_update >=
@@ -1252,7 +1279,9 @@ void PG::calc_replicated_acting(
 
 	ss << "calc_acting primary is osd." << primary->first
 		<< " with " << primary->second << std::endl;
+
 	*want_primary = primary->first;
+
 	want->push_back(primary->first.osd);
 	acting_backfill->insert(primary->first);
 	unsigned usable = 1;
@@ -1371,15 +1400,18 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 		dout(10) << "calc_acting osd." << p->first << " " << p->second << dendl;
 	}
 
+	/* OyTao: 获取权威日志的OSD */
 	map<pg_shard_t, pg_info_t>::const_iterator auth_log_shard =
 		find_best_info(all_info);
 
 	if (auth_log_shard == all_info.end()) {
+		/* OyTao: 如果没有找到权威日志 */
 		if (up != acting) {
 			dout(10) << "choose_acting no suitable info found (incomplete backfills?),"
 				<< " reverting to up" << dendl;
 			want_acting = up;
 			vector<int> empty;
+			/* OyTao: 申请临时PG */
 			osd->queue_want_pg_temp(info.pgid.pgid, empty);
 		} else {
 			dout(10) << "choose_acting failed" << dendl;
@@ -1388,6 +1420,8 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 		return false;
 	}
 
+	/* OyTao: TODO
+	 * auth_log_share. completed 为什需要做这些检查，然后find_best_info*/　
 	if ((up.size() &&
 			!all_info.find(up_primary)->second.is_incomplete() &&
 			all_info.find(up_primary)->second.last_update >=
@@ -1410,6 +1444,7 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 	auth_log_shard_id = auth_log_shard->first;
 
 	// Determine if compatibility needed
+	// OyTao: compate mode TODO */
 	bool compat_mode = !cct->_conf->osd_debug_override_acting_compat;
 	if (compat_mode) {
 		bool all_support = true;
@@ -1430,10 +1465,12 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 		  compat_mode = false;
 	}
 
+
 	set<pg_shard_t> want_backfill, want_acting_backfill;
 	vector<int> want;
 	pg_shard_t want_primary;
 	stringstream ss;
+
 	if (!pool.info.ec_pool())
 	  calc_replicated_acting(
 				  auth_log_shard,
@@ -7122,6 +7159,8 @@ void PG::RecoveryState::GetInfo::get_infos()
 
 /*
  * OyTao: primary osd received pg_info_t from non-primary osds.
+ * 如果收到了所有的OSD的pg_info，则针对所有的past intervals都需要检查，检查每一个
+ * interval中acting中的OSD至少有一个是completed并且是up的状态。
  */
 boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& infoevt) 
 {
@@ -7236,7 +7275,7 @@ boost::statechart::result PG::RecoveryState::GetInfo::react(const MNotifyRec& in
 						
 						/* 
 						 * OyTao: Now, 当前OSDMap肯定存在@o, 
-						 * 并且在@interval之后没有lost
+						 * 并且在@interval之后没有lost,并且是completed.
 						 */
 						if (osdmap->is_up(o)) {
 							pg_info_t *pinfo;
