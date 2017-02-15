@@ -42,6 +42,7 @@ how far back divergent log entries can be found.
 
 However, in a case like
 
+
 .. code:: none
 
   calc_acting osd.0 1.4e( v 473'302 (292'200,473'302] local-les=473 n=4 ec=5 les/c 473/473 556/556/556
