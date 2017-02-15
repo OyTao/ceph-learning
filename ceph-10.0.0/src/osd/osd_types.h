@@ -1911,6 +1911,7 @@ struct pg_info_t {
   /* OyTao: 最老的日志对应的版本 */
   eversion_t log_tail;         ///< oldest log entry.
 
+  /* OyTao: backfill 修复进程的指针 */
   hobject_t last_backfill;     ///< objects >= this and < last_complete may be missing
   bool last_backfill_bitwise;  ///< true if last_backfill reflects a bitwise (vs nibblewise) sort
 

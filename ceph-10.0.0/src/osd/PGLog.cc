@@ -332,10 +332,12 @@ void PGLog::proc_replica_log(
  * There are 5 distinct cases:
  * 1) There is a more recent update: in this case we assume we adjusted the
  *    store and missing during merge_log
+ *
  * 2) The first entry in the divergent sequence is a create.  This might
  *    either be because the object is a clone or because prior_version is
  *    eversion_t().  In this case the object does not exist and we must
  *    adjust missing and the store to match.
+ *
  * 3) We are currently missing the object.  In this case, we adjust the
  *    missing to our prior_version taking care to add a divergent_prior
  *    if necessary
@@ -346,6 +348,11 @@ void PGLog::proc_replica_log(
  *    prior_version taking care to add a divergent_prior if
  *    necessary.
  */
+/*
+ * OyTao:
+ * @entryies：是同一个object(@hoid)的pg_log_entry_t 集合
+ *
+ */ 
 void PGLog::_merge_object_divergent_entries(
 			const IndexedLog &log,
 			const hobject_t &hoid,
@@ -360,6 +367,7 @@ void PGLog::_merge_object_divergent_entries(
 	dout(10) << __func__ << ": merging hoid " << hoid
 		<< " entries: " << entries << dendl;
 
+	
 	if (cmp(hoid, info.last_backfill, info.last_backfill_bitwise) > 0) {
 		dout(10) << __func__ << ": hoid " << hoid << " after last_backfill"
 			<< dendl;
@@ -369,19 +377,28 @@ void PGLog::_merge_object_divergent_entries(
 	// entries is non-empty
 	assert(!entries.empty());
 	eversion_t last;
+
+	/* 
+	 * OyTao: 检查@entries中的所有的pg_log_entry_t,是按照version的大小来排序的，
+	 * 并且后一个的privor_version == prev log entry.version
+	 */
 	for (list<pg_log_entry_t>::const_iterator i = entries.begin();
 				i != entries.end();
 				++i) {
+
 		// all entries are on hoid
 		assert(i->soid == hoid);
+
 		if (i != entries.begin() && i->prior_version != eversion_t()) {
 			// in increasing order of version
 			assert(i->version > last);
 			// prior_version correct
 			assert(i->prior_version == last);
 		}
+
 		last = i->version;
 
+		/* OyTao: TODO */
 		if (rollbacker)
 		  rollbacker->trim(*i);
 	}
@@ -389,9 +406,11 @@ void PGLog::_merge_object_divergent_entries(
 	const eversion_t prior_version = entries.begin()->prior_version;
 	const eversion_t first_divergent_update = entries.begin()->version;
 	const eversion_t last_divergent_update = entries.rbegin()->version;
+
 	const bool object_not_in_store =
 		!missing.is_missing(hoid) &&
 		entries.rbegin()->is_delete();
+
 	dout(10) << __func__ << ": hoid " << hoid
 		<< " prior_version: " << prior_version
 		<< " first_divergent_update: " << first_divergent_update
@@ -400,6 +419,7 @@ void PGLog::_merge_object_divergent_entries(
 
 	ceph::unordered_map<hobject_t, pg_log_entry_t*>::const_iterator objiter =
 		log.objects.find(hoid);
+
 	if (objiter != log.objects.end() &&
 				objiter->second->version >= first_divergent_update) {
 		/// Case 1)
@@ -415,6 +435,7 @@ void PGLog::_merge_object_divergent_entries(
 		} else {
 			assert(!missing.is_missing(hoid));
 		}
+
 		missing.revise_have(hoid, eversion_t());
 		if (rollbacker && !object_not_in_store)
 		  rollbacker->remove(hoid);
@@ -423,6 +444,7 @@ void PGLog::_merge_object_divergent_entries(
 
 	dout(10) << __func__ << ": hoid " << hoid
 		<<" has no more recent entries in log" << dendl;
+
 	if (prior_version == eversion_t() || entries.front().is_clone()) {
 		/// Case 2)
 		dout(10) << __func__ << ": hoid " << hoid
@@ -575,7 +597,7 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 }
 
 /*
- * OyTao: 
+ * OyTao: TODO 
  */
 void PGLog::merge_log(ObjectStore::Transaction& t,
 			pg_info_t &oinfo, pg_log_t &olog, pg_shard_t fromosd,
@@ -691,8 +713,10 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 			pg_log_entry_t &ne = *p;
 			dout(20) << "merge_log " << ne << dendl;
 
+			/* OyTao: TODO */
 			log.index(ne);
 
+			/* OyTao: 如果@ne < last_backfill */
 			if (cmp(ne.soid, info.last_backfill, info.last_backfill_bitwise) <= 0) {
 				missing.add_next_event(ne);
 				if (ne.is_delete())
@@ -700,7 +724,11 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 			}
 		}
 
+
 		// move aside divergent items
+		/* 
+		 * OyTao: TODO 
+		 */
 		list<pg_log_entry_t> divergent;
 		while (!log.empty()) {
 			pg_log_entry_t &oe = *log.log.rbegin();
@@ -738,6 +766,7 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 					missing,
 					&new_priors,
 					rollbacker);
+
 		for (map<eversion_t, hobject_t>::iterator i = new_priors.begin();
 					i != new_priors.end();
 					++i) {
