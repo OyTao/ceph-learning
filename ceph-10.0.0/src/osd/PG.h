@@ -624,7 +624,12 @@ protected:
    */
   
   bool        need_up_thru;
+  /*
+   * OyTao: GetInfo 收到非up set, acting set的OSD的pg_info_t,
+   * 将该OSD加入到stray_set中.
+   */
   set<pg_shard_t>    stray_set;   // non-acting osds that have PG data.
+
   eversion_t  oldest_update; // acting: lowest (valid) last_update in active set
   map<pg_shard_t, pg_info_t>    peer_info;   // info from peers (stray or prior)
   set<pg_shard_t> peer_purged; // peers purged

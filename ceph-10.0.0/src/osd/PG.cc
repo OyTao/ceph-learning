@@ -277,6 +277,7 @@ void PG::proc_master_log(
 {
 	dout(10) << "proc_master_log for osd." << from << ": "
 		<< olog << " " << omissing << dendl;
+
 	assert(!is_peered() && is_primary());
 
 	// merge log into our own log to build master log.  no need to
@@ -284,13 +285,16 @@ void PG::proc_master_log(
 	// log to be authoritative (i.e., their entries are by definitely
 	// non-divergent).
 	merge_log(t, oinfo, olog, from);
+
 	peer_info[from] = oinfo;
 	dout(10) << " peer osd." << from << " now " << oinfo << " " << omissing << dendl;
+
 	might_have_unfound.insert(from);
 
 	// See doc/dev/osd_internals/last_epoch_started
 	if (oinfo.last_epoch_started > info.last_epoch_started)
 	  info.last_epoch_started = oinfo.last_epoch_started;
+
 	info.history.merge(oinfo.history);
 	assert(info.last_epoch_started >= info.history.last_epoch_started);
 
@@ -368,7 +372,7 @@ bool PG::proc_replica_info(
 	reg_next_scrub();
 
 	// stray?
-	/* OyTao: 如果@from OSD不属于acting or up set,则加入stray_set. */
+	/* OyTao: 如果@from OSD不属于acting or up set,则加入stray_set. TODO */
 	if (!is_up(from) && !is_acting(from)) {
 		dout(10) << " osd." << from << " has stray content: " << oinfo << dendl;
 		stray_set.insert(from);
@@ -435,6 +439,7 @@ void PG::merge_log(
 	PGLogEntryHandler rollbacker;
 	pg_log.merge_log(
 				t, oinfo, olog, from, info, &rollbacker, dirty_info, dirty_big_info);
+
 	rollbacker.apply(this, &t);
 }
 
@@ -1236,6 +1241,17 @@ void PG::calc_ec_acting(
  * incomplete, or another osd has a longer tail that allows us to
  * bring other up nodes up to date.
  */
+
+/*
+ * OyTao: @size: 需要的OSD数目
+ * 1. 首先确定primary OSD.（want_primary,优先选择up_primary,如果up_primary可以通过
+ *    recovery方式进行数据恢复或者up_primary就是拥有当前的权威日志)
+ * 2. 从up set, acting set, all_info中找出@size个可以通过recovery方式恢复的OSDs，
+ *   （completed & last_update > primary.last_tail)
+ *    同时将这些@size OSDs加入到@want.
+ *    @want_backfill 只是从up set中的OSDs去除可以通过recovery恢复的OSDs.
+ *    @want_acting_backfill 是找到符合条件的@size OSDs之前，所有的OSDs都加入其中
+ */
 void PG::calc_replicated_acting(
 			map<pg_shard_t, pg_info_t>::const_iterator auth_log_shard,
 			unsigned size,
@@ -1261,7 +1277,7 @@ void PG::calc_replicated_acting(
 	 * OyTao:
 	 * 优先选择up_primary作为primary OSD.
 	 * 如果@up_primary的log与权威日志有重叠 (last_update >= log.tail),
-	 * 后续可以通过日志记录恢复。
+	 * 后续可以通过recovery方式日志记录恢复。(加入到@want)
 	 * 并且@up_primary是completed状态。
 	 */
 	if (up.size() &&
@@ -1286,6 +1302,12 @@ void PG::calc_replicated_acting(
 	acting_backfill->insert(primary->first);
 	unsigned usable = 1;
 
+	/*
+	 * OyTao: 除了当前的@want_primary，还需要size - 1个 osd.
+	 * 所有在up set, acting set, all_info中依次找到符合个数的osd.
+	 * 同时这些OSD是可以通过recovery方式进行数据恢复的。
+	 * (complete & last_update > primary.log_tail)
+	 */
 	// select replicas that have log contiguity with primary.
 	// prefer up, then acting, then any peer_info osds 
 	for (vector<int>::const_iterator i = up.begin();
@@ -1389,6 +1411,15 @@ void PG::calc_replicated_acting(
  * calculate the desired acting, and request a change with the monitor
  * if it differs from the current acting.
  */
+/*
+ * OyTao:
+ * 1) find_best_info: 在@all_info中获取拥有权威日志的OSD @auth_log_shared.
+ * 2) 根据Replicated和EC类型，获取对应可以通过日志恢复的OSD set @want.
+ * 3) 通过replicated_pridicate函数，检查@want是否可以完成数据恢复
+ * 4) 如果@want != @acting, 则表示需要申请pg_temp. 返回flase, 但是@want不清空，
+ *    但是其他返回false情况下，需要clear @want.
+ *
+ */
 bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 {
 	map<pg_shard_t, pg_info_t> all_info(peer_info.begin(), peer_info.end());
@@ -1465,7 +1496,13 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 		  compat_mode = false;
 	}
 
-
+	/* 
+	 * OyTao:
+	 * 1) @want_backfill: 需要通过backfill方式进行数据恢复
+	 * 2) @want: 可以通过recovery方式进行数据恢复
+	 * 3) @want_acting_backfill:
+	 * 4) @want_primary:
+	 */
 	set<pg_shard_t> want_backfill, want_acting_backfill;
 	vector<int> want;
 	pg_shard_t want_primary;
@@ -1503,6 +1540,7 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 				  ss);
 	dout(10) << ss.str() << dendl;
 
+	/*  @num_want_acting: @want 中的osd 数目 */
 	unsigned num_want_acting = 0;
 	for (vector<int>::iterator i = want.begin();
 				i != want.end();
@@ -1524,6 +1562,7 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 	}
 
 	/* Check whether we have enough acting shards to later perform recovery */
+	/* OyTao: 通过recoverable_predicate函数检测目前所有的@want 是否可以恢复 */
 	boost::scoped_ptr<IsPGRecoverablePredicate> recoverable_predicate(
 				get_pgbackend()->get_is_recoverable_predicate());
 	set<pg_shard_t> have;
@@ -1534,12 +1573,15 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 						  want[i],
 						  pool.info.ec_pool() ? shard_id_t(i) : shard_id_t::NO_SHARD));
 	}
+
+
 	if (!(*recoverable_predicate)(have)) {
 		want_acting.clear();
 		dout(10) << "choose_acting failed, not recoverable" << dendl;
 		return false;
 	}
 
+	/* OyTao: 需要申请临时pg_temp. */
 	if (want != acting) {
 		dout(10) << "choose_acting want " << want << " != acting " << acting
 			<< ", requesting pg_temp change" << dendl;
@@ -1551,14 +1593,23 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 			assert(compat_mode || want_backfill.empty());
 			vector<int> empty;
 			osd->queue_want_pg_temp(info.pgid.pgid, empty);
+
 		} else
 		  osd->queue_want_pg_temp(info.pgid.pgid, want);
+
 		return false;
 	}
+
+	/*
+	 * OyTao: 确认backfill_targets 中不存在strary_set
+	 * backfill_targets = want_backfill;
+	 * @stray_set:非acting OSD拥有PG Data。 TODO 
+	 */
 	want_acting.clear();
 	actingbackfill = want_acting_backfill;
 	dout(10) << "actingbackfill is " << actingbackfill << dendl;
 	assert(backfill_targets.empty() || backfill_targets == want_backfill);
+
 	if (backfill_targets.empty()) {
 		// Caller is GetInfo
 		backfill_targets = want_backfill;
@@ -1570,6 +1621,7 @@ bool PG::choose_acting(pg_shard_t &auth_log_shard_id)
 	} else {
 		// Will not change if already set because up would have had to change
 		assert(backfill_targets == want_backfill);
+
 		// Verify that nothing in backfill is in stray_set
 		for (set<pg_shard_t>::iterator i = want_backfill.begin();
 					i != want_backfill.end();
@@ -2446,6 +2498,7 @@ void PG::cancel_recovery()
 }
 
 
+/* OyTao: TODO */
 void PG::purge_strays()
 {
 	dout(10) << "purge_strays " << stray_set << dendl;
@@ -7367,8 +7420,10 @@ PG::RecoveryState::GetLog::GetLog(my_context ctx)
 	// adjust acting?
 	if (!pg->choose_acting(auth_log_shard)) {
 		if (!pg->want_acting.empty()) {
+			/* OyTao: 处理申请pg_temp */
 			post_event(NeedActingChange());
 		} else {
+			/* PG 无法恢复 */
 			post_event(IsIncomplete());
 		}
 		return;
@@ -7380,9 +7435,11 @@ PG::RecoveryState::GetLog::GetLog(my_context ctx)
 		return;
 	}
 
+	/* OyTao: 拥有权威日志的OSD */
 	const pg_info_t& best = pg->peer_info[auth_log_shard];
 
 	// am i broken?
+	/* OyTao: 当前的OSD无法通过日志，recovery恢复 */
 	if (pg->info.last_update < best.log_tail) {
 		dout(10) << " not contiguous with osd." << auth_log_shard << ", down" << dendl;
 		post_event(IsIncomplete());
@@ -7390,6 +7447,11 @@ PG::RecoveryState::GetLog::GetLog(my_context ctx)
 	}
 
 	// how much log to request?
+	/* 
+	 * OyTao: 在所有的actingbackfill集合中，如果有比当前@pg_info.last_update还
+	 * 小的last_update, 并且其OSD还是可以通过日志reconvery恢复，则 
+	 * request_log_from == min (last_update) 
+	 */
 	eversion_t request_log_from = pg->info.last_update;
 	assert(!pg->actingbackfill.empty());
 	for (set<pg_shard_t>::iterator p = pg->actingbackfill.begin();
@@ -7402,6 +7464,7 @@ PG::RecoveryState::GetLog::GetLog(my_context ctx)
 	}
 
 	// how much?
+	/* OyTao: 想权威日志所在的OSD请求pg log */
 	dout(10) << " requesting log from osd." << auth_log_shard << dendl;
 	context<RecoveryMachine>().send_query(
 				auth_log_shard,
@@ -7412,7 +7475,10 @@ PG::RecoveryState::GetLog::GetLog(my_context ctx)
 					pg->get_osdmap()->get_epoch()));
 
 	assert(pg->blocked_by.empty());
+
+	/* OyTao: TODO  */
 	pg->blocked_by.insert(auth_log_shard.osd);
+
 	pg->publish_stats_to_osd();
 }
 
@@ -7457,10 +7523,12 @@ boost::statechart::result PG::RecoveryState::GetLog::react(const GotLog&)
 					msg->info, msg->log, msg->missing, 
 					auth_log_shard);
 	}
+
 	pg->start_flush(
 				context< RecoveryMachine >().get_cur_transaction(),
 				context< RecoveryMachine >().get_on_applied_context_list(),
 				context< RecoveryMachine >().get_on_safe_context_list());
+
 	return transit< GetMissing >();
 }
 
