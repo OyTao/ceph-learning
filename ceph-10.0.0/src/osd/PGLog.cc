@@ -351,7 +351,7 @@ void PGLog::proc_replica_log(
 /*
  * OyTao:
  * @entryies：是同一个object(@hoid)的pg_log_entry_t 集合
- *
+ * TODO 
  */ 
 void PGLog::_merge_object_divergent_entries(
 			const IndexedLog &log,
@@ -429,6 +429,7 @@ void PGLog::_merge_object_divergent_entries(
 			<< *objiter->second << ", already merged" << dendl;
 
 		// ensure missing has been updated appropriately
+		/* OyTao: TODO */
 		if (objiter->second->is_update()) {
 			assert(missing.is_missing(hoid) &&
 						missing.missing[hoid].need == objiter->second->version);
@@ -445,6 +446,7 @@ void PGLog::_merge_object_divergent_entries(
 	dout(10) << __func__ << ": hoid " << hoid
 		<<" has no more recent entries in log" << dendl;
 
+	/* OyTao: 为什么不需要修复 TODO */
 	if (prior_version == eversion_t() || entries.front().is_clone()) {
 		/// Case 2)
 		dout(10) << __func__ << ": hoid " << hoid
@@ -520,6 +522,7 @@ void PGLog::_merge_object_divergent_entries(
 		if (rollbacker && !object_not_in_store)
 		  rollbacker->remove(hoid);
 		missing.add(hoid, prior_version, eversion_t());
+
 		if (prior_version <= info.log_tail) {
 			dout(10) << __func__ << ": hoid " << hoid
 				<< " prior_version " << prior_version << " <= info.log_tail "
@@ -546,6 +549,10 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 	dout(10) << "rewind_divergent_log truncate divergent future " << newhead << dendl;
 	assert(newhead >= log.tail);
 
+	/* 
+	 * OyTao: 将log中version从@newhead开始(不包括@newhead的version的Log),
+	 * 都移入到divergent list中。
+	 */
 	list<pg_log_entry_t>::iterator p = log.log.end();
 	list<pg_log_entry_t> divergent;
 	while (true) {
@@ -561,10 +568,16 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 			divergent.splice(divergent.begin(), log.log, p, log.log.end());
 			break;
 		}
+
 		assert(p->version > newhead);
 		dout(10) << "rewind_divergent_log future divergent " << *p << dendl;
 	}
 
+	/*
+	 * OyTao: 将log中的最新日志更新为newhead
+	 * (head, last_update, last_complete)
+	 * TODO: 为什么log中一定存在@newhead的日志
+	 */
 	log.head = newhead;
 	info.last_update = newhead;
 	if (info.last_complete > newhead)
@@ -581,6 +594,7 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 				missing,
 				&new_priors,
 				rollbacker);
+
 	for (map<eversion_t, hobject_t>::iterator i = new_priors.begin();
 				i != new_priors.end();
 				++i) {

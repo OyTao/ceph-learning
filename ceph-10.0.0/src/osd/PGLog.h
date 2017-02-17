@@ -55,6 +55,7 @@ struct PGLog {
 	 * plus some methods to manipulate it all.
 	 */
 	struct IndexedLog : public pg_log_t {
+		/* OyTao: TODO */
 		ceph::unordered_map<hobject_t,pg_log_entry_t*> objects;  // ptrs into log.  be careful!
 		ceph::unordered_map<osd_reqid_t,pg_log_entry_t*> caller_ops;
 		ceph::unordered_multimap<osd_reqid_t,pg_log_entry_t*> extra_caller_ops;

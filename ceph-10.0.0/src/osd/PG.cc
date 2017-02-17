@@ -1045,7 +1045,7 @@ void PG::clear_primary_state()
  * 3) 选择当前的OSD
  *
  * 首先在所有的pg_info中，
- * 根据pg_info.history以及pg_info 找出最大的last_epoch_stated.
+ * 根据pg_info.history以及pg_info 找出最大的last_epoch_started.
  * (max_last_epoch_started_found)
  * 然后在这拥有最大的last_epoch_started的OSDs的中找出最小的last_updates.
  * (min_last_update_acceptable)
