@@ -3630,8 +3630,10 @@ void pg_missing_t::add_next_event(const pg_log_entry_t& e)
 {
 	if (e.is_update()) {
 		map<hobject_t, item, hobject_t::ComparatorWithDefault>::iterator missing_it;
+
 		missing_it = missing.find(e.soid);
 		bool is_missing_divergent_item = missing_it != missing.end();
+
 		if (e.prior_version == eversion_t() || e.is_clone()) {
 			// new object.
 			if (is_missing_divergent_item) {  // use iterator

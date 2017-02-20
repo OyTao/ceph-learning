@@ -210,14 +210,19 @@ struct PGLog {
 			  ++rollback_info_trimmed_to_riter;
 		}
 
+		/*
+		 * OyTao: TODO 
+		 */
 		void index(pg_log_entry_t& e) {
 			if (objects.count(e.soid) == 0 || 
 						objects[e.soid]->version < e.version)
 			  objects[e.soid] = &e;
+
 			if (e.reqid_is_indexed()) {
 				//assert(caller_ops.count(i->reqid) == 0);  // divergent merge_log indexes new before unindexing old
 				caller_ops[e.reqid] = &e;
 			}
+
 			for (vector<pair<osd_reqid_t, version_t> >::const_iterator j =
 						e.extra_reqids.begin();
 						j != e.extra_reqids.end();
@@ -225,6 +230,7 @@ struct PGLog {
 				extra_caller_ops.insert(make_pair(j->first, &e));
 			}
 		}
+
 		void unindex() {
 			objects.clear();
 			caller_ops.clear();
@@ -605,6 +611,7 @@ struct PGLog {
 						omissing,
 						&new_divergent_prior,
 						rollbacker);
+
 			if (priors && new_divergent_prior) {
 				(*priors)[new_divergent_prior->first] = new_divergent_prior->second;
 			}

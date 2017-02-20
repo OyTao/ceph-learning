@@ -351,6 +351,8 @@ void PGLog::proc_replica_log(
 /*
  * OyTao:
  * @entryies：是同一个object(@hoid)的pg_log_entry_t 集合
+ * @log: 已经移除了所有的@entries.(分歧的日志)
+ * @missing: 需要修复的版本
  * TODO 
  */ 
 void PGLog::_merge_object_divergent_entries(
@@ -417,6 +419,7 @@ void PGLog::_merge_object_divergent_entries(
 		<< " last_divergent_update: " << last_divergent_update
 		<< dendl;
 
+
 	ceph::unordered_map<hobject_t, pg_log_entry_t*>::const_iterator objiter =
 		log.objects.find(hoid);
 
@@ -437,7 +440,9 @@ void PGLog::_merge_object_divergent_entries(
 			assert(!missing.is_missing(hoid));
 		}
 
+		/* OyTao: TODO */
 		missing.revise_have(hoid, eversion_t());
+
 		if (rollbacker && !object_not_in_store)
 		  rollbacker->remove(hoid);
 		return;
@@ -446,19 +451,28 @@ void PGLog::_merge_object_divergent_entries(
 	dout(10) << __func__ << ": hoid " << hoid
 		<<" has no more recent entries in log" << dendl;
 
-	/* OyTao: 为什么不需要修复 TODO */
+	/* OyTao: 如果对象是create或者是delete操作，都可以将其从修复列表missing删除*/
 	if (prior_version == eversion_t() || entries.front().is_clone()) {
 		/// Case 2)
 		dout(10) << __func__ << ": hoid " << hoid
 			<< " prior_version or op type indicates creation, deleting"
 			<< dendl;
+		/* OyTao: */
 		if (missing.is_missing(hoid))
 		  missing.rm(missing.missing.find(hoid));
+
 		if (rollbacker && !object_not_in_store)
 		  rollbacker->remove(hoid);
 		return;
 	}
 
+	/*
+	 * OyTao:
+	 * 如果在修复列表中已经存在该对象。并且已经拥有的版本@have就是@prior_version
+	 * 可以直接将其从修复列表@missing中删除。
+	 * 否则需要将其在missing中的need修改为@prior_version, 如果@prior_version < 
+	 * log.tail.则将其加入到@new_divergent_prior.
+	 */
 	if (missing.is_missing(hoid)) {
 		/// Case 3)
 		dout(10) << __func__ << ": hoid " << hoid
@@ -471,10 +485,12 @@ void PGLog::_merge_object_divergent_entries(
 				<< " removing from missing" << dendl;
 			missing.rm(missing.missing.find(hoid));
 		} else {
+
 			dout(10) << __func__ << ": hoid " << hoid
 				<< " missing.have is " << missing.missing[hoid].have
 				<< ", adjusting" << dendl;
 			missing.revise_need(hoid, prior_version);
+
 			if (prior_version <= info.log_tail) {
 				dout(10) << __func__ << ": hoid " << hoid
 					<< " prior_version " << prior_version << " <= info.log_tail "
@@ -482,6 +498,7 @@ void PGLog::_merge_object_divergent_entries(
 				if (new_divergent_prior)
 				  *new_divergent_prior = make_pair(prior_version, hoid);
 			}
+
 		}
 		return;
 	}
@@ -502,6 +519,9 @@ void PGLog::_merge_object_divergent_entries(
 		}
 	}
 
+	/*
+	 * OyTao: rollback TODO 
+	 */
 	if (can_rollback) {
 		/// Case 4)
 		for (list<pg_log_entry_t>::const_reverse_iterator i = entries.rbegin();
@@ -541,6 +561,9 @@ void PGLog::_merge_object_divergent_entries(
  *
  * @param t transaction
  * @param newhead new head to rewind to
+ */
+/*
+ * OyTao: @newhead < p.log.end.version
  */
 void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead,
 			pg_info_t &info, LogEntryHandler *rollbacker,
@@ -595,6 +618,10 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 				&new_priors,
 				rollbacker);
 
+	/*
+	 * 如果在merge divergent entries过程中，出现@privor_version < log.tail
+	 * 则将其加入到divergent_prior中
+	 */
 	for (map<eversion_t, hobject_t>::iterator i = new_priors.begin();
 				i != new_priors.end();
 				++i) {
@@ -603,6 +630,10 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 					i->second);
 	}
 
+	/*
+	 * OyTao: 因为在合并的时候可能@last_update会变成@new_head。需要修正
+	 * @can_rollback_to
+	 */
 	if (info.last_update < log.can_rollback_to)
 	  log.can_rollback_to = info.last_update;
 
@@ -611,7 +642,32 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
 }
 
 /*
- * OyTao: TODO 
+ * OyTao:
+ * @oinfo, @log remote log.(权威日志)
+ * @info 本地日志
+ *
+ * merge_log的前提，是remote log与当前current log必须有overlap.
+ *	assert(log.head >= olog.tail && olog.head >= log.tail);
+ * 
+ * case 1) log.tail > olog.tail 
+ *	将olog.tail --> log.tail添加到current log中, 同时设置dirty_to == log.tail
+ *
+ * case 2) log.head > olog.head 
+ * 本地日志最新的部分比权威日志的最新的部分多。
+ * a) 需要将多出来的部分按照object，分别处理。(_merge_object_divergent_entries)
+ *    1. 如果在missing在@have == prior_version,则删除;
+ *    2. 如果在missing中存在，但是@have !=prior_version,则修改need = prior_version.
+ *    3. 如果在没有分歧的日志中找到的object日志version > first_divergent_version,
+ *       可能是在merge_log中已经处理，这里什么都不做。
+ *    4. 如果prior_version是create/delete操作，则不需要处理。
+ *    5. 根据rollback回滚（TODO）
+ *
+ * b) 将当前的日志的last_update，head更新为与权威日志一致
+ *
+ * case 3) log.head < olog.head 
+ *
+ *
+ * case 4) log.tail < olog.tail (为什么没有处理此种情况 TODO)
  */
 void PGLog::merge_log(ObjectStore::Transaction& t,
 			pg_info_t &oinfo, pg_log_t &olog, pg_shard_t fromosd,
@@ -690,6 +746,10 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 
 
 	// do we have divergent entries to throw out?
+	/*
+	 * OyTao: 如果权威日志的head < 当前日志的head,
+	 * 则需要将多余出来的日志按照每个object进行rewind.
+	 */
 	if (olog.head < log.head) {
 		rewind_divergent_log(t, olog.head, info, rollbacker, dirty_info, dirty_big_info);
 		changed = true;
@@ -697,7 +757,8 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 
 	// extend on head?
 	/*
-	 * OyTao: from == log.head & to = olog.log.end()
+	 * OyTao: from > log.head & to = olog.log.end()
+	 * lower_bound == from->version.
 	 */
 	if (olog.head > log.head) {
 		dout(10) << "merge_log extending head to " << olog.head << dendl;
@@ -719,7 +780,7 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 			}
 		}
 
-		/* OyTao:  */
+		/* OyTao: */
 		mark_dirty_from(lower_bound);
 
 		// index, update missing, delete deleted
@@ -732,7 +793,9 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 
 			/* OyTao: 如果@ne < last_backfill */
 			if (cmp(ne.soid, info.last_backfill, info.last_backfill_bitwise) <= 0) {
+
 				missing.add_next_event(ne);
+
 				if (ne.is_delete())
 				  rollbacker->remove(ne.soid);
 			}
@@ -741,7 +804,11 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 
 		// move aside divergent items
 		/* 
-		 * OyTao: TODO 
+		 * OyTao: 
+		 * @lower_bound是在olog中从后往前找，第一个<=log.head的log.
+		 * 有可能出现lower_bound.version < log.head.version,(造成原因未知 TODO)
+		 * 此时需要将这些的log加入到divergent列表中，同时从log中删除
+		 * 
 		 */
 		list<pg_log_entry_t> divergent;
 		while (!log.empty()) {
@@ -762,6 +829,10 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 		}
 
 		// splice
+		/* 
+		 * OyTao:将@from-->@to加入到log中 (merge log)
+		 * 当时更新@last_update, last_user_version, purged_snap(TODO) 
+		 */
 		log.log.splice(log.log.end(), 
 					olog.log, from, to);
 		log.index();   
@@ -771,6 +842,9 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 		info.last_user_version = oinfo.last_user_version;
 		info.purged_snaps = oinfo.purged_snaps;
 
+		/* 
+		 * OyTao: merge divergent object 
+		 */
 		map<eversion_t, hobject_t> new_priors;
 		_merge_divergent_entries(
 					log,
