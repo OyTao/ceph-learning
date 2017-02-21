@@ -3626,6 +3626,17 @@ eversion_t pg_missing_t::have_old(const hobject_t& oid) const
  * this needs to be called in log order as we extend the log.  it
  * assumes missing is accurate up through the previous log entry.
  */
+/*
+ * OyTao:
+ * 添加@e pg_log_entry_t到missing列表中。
+ * 如果已经在missing在中，需要更新need为@e的version。
+ * 如果不在missing中，添加新的item.
+ *
+ * 同时更新rmmissing中对应的项。
+ * @rmissing与@missing是反向映射。
+ * 在@missing中存的是key: object; Value: (need_version, have_version)
+ * 在@rmissing中村的是Key: (need_version) Value: object
+ */
 void pg_missing_t::add_next_event(const pg_log_entry_t& e)
 {
 	if (e.is_update()) {
@@ -3641,6 +3652,7 @@ void pg_missing_t::add_next_event(const pg_log_entry_t& e)
 				missing_it->second = item(e.version, eversion_t());  // .have = nil
 			} else  // create new element in missing map
 			  missing[e.soid] = item(e.version, eversion_t());     // .have = nil
+
 		} else if (is_missing_divergent_item) {
 			// already missing (prior).
 			rmissing.erase((missing_it->second).need.version);
@@ -3653,6 +3665,7 @@ void pg_missing_t::add_next_event(const pg_log_entry_t& e)
 			assert(!is_missing_divergent_item);
 			missing[e.soid] = item(e.version, e.prior_version);
 		}
+
 		rmissing[e.version.version] = e.soid;
 	} else
 	  rm(e.soid, e.version);
