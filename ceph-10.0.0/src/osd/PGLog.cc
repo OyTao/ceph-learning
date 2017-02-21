@@ -218,9 +218,7 @@ void PGLog::proc_replica_log(
 	}
 
 	/*
-	 * OyTao:
-	 * olog.tail -------------------- olog.head
-	 *     log.tail --------------
+	 * OyTao: remote OSD与primary OSD肯定有日志重叠
 	 */
 	assert(olog.head >= log.tail);
 
@@ -269,6 +267,7 @@ void PGLog::proc_replica_log(
 
 	list<pg_log_entry_t> divergent;
 	list<pg_log_entry_t>::const_iterator pp = olog.log.end();
+
 	while (true) {
 		if (pp == olog.log.begin())
 		  break;
@@ -665,6 +664,8 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
  * b) 将当前的日志的last_update，head更新为与权威日志一致
  *
  * case 3) log.head < olog.head 
+ * a) 把确实的日志加入到当前本地日志中。
+ * b) 把缺失的日志中加入到missing对象中。
  *
  *
  * case 4) log.tail < olog.tail (为什么没有处理此种情况 TODO)
@@ -794,6 +795,7 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 			/* OyTao: 如果@ne < last_backfill */
 			if (cmp(ne.soid, info.last_backfill, info.last_backfill_bitwise) <= 0) {
 
+				/* OyTao; 将ne添加到missing列表中 */
 				missing.add_next_event(ne);
 
 				if (ne.is_delete())

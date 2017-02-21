@@ -301,6 +301,9 @@ void PG::proc_master_log(
 	peer_missing[from].swap(omissing);
 }
 
+/*
+ * OyTao: primary OSD处理remote OSD log。
+ */
 void PG::proc_replica_log(
 			ObjectStore::Transaction& t,
 			pg_info_t &oinfo, pg_log_t &olog, pg_missing_t& omissing,
@@ -313,6 +316,7 @@ void PG::proc_replica_log(
 
 	peer_info[from] = oinfo;
 	dout(10) << " peer osd." << from << " now " << oinfo << " " << omissing << dendl;
+
 	might_have_unfound.insert(from);
 
 	for (map<hobject_t, pg_missing_t::item, hobject_t::ComparatorWithDefault>::iterator i = omissing.missing.begin();
@@ -321,6 +325,7 @@ void PG::proc_replica_log(
 		dout(20) << " after missing " << i->first << " need " << i->second.need
 			<< " have " << i->second.have << dendl;
 	}
+
 	peer_missing[from].swap(omissing);
 }
 
@@ -1055,6 +1060,13 @@ void PG::clear_primary_state()
  * @best.completed
  *
  * 在符合了上述条件中的OSD,再根据上述选择的规则选择权威日志所在的OSD
+ *
+ * 拥有权威日志的OSD的特征如下：
+ * 1) completed的OSD
+ * 2) 拥有最大的last_epoch_started
+ * 3) 在保证1)与2)的前提下，last_update是最大的。
+ * 4) 在保证1), 2), 3)的前提下，log_tail最小的，日志最长的。
+ * 5) 选择当前的OSD
  */
 ap<pg_shard_t, pg_info_t>::const_iterator PG::find_best_info(
 			const map<pg_shard_t, pg_info_t> &infos) const
@@ -7513,6 +7525,9 @@ boost::statechart::result PG::RecoveryState::GetLog::react(const MLogRec& logevt
 	return discard_event();
 }
 
+/*
+ * OyTao: 收到权威日志的OSD的信息
+ */
 boost::statechart::result PG::RecoveryState::GetLog::react(const GotLog&)
 {
 	dout(10) << "leaving GetLog" << dendl;
@@ -7688,18 +7703,33 @@ PG::RecoveryState::GetMissing::GetMissing(my_context ctx)
 
 		if (pi.is_empty())
 		  continue;                                // no pg data, nothing divergent
-
+	
+		/* 
+		 * OyTao: 如果remote OSD的last_update < current OSD的log_tail，则表示
+		 * 两者OSDs的日志没有重叠，无法通过日志进行数据恢复。只能backfill。
+		 */
 		if (pi.last_update < pg->pg_log.get_tail()) {
 			dout(10) << " osd." << *i << " is not contiguous, will restart backfill" << dendl;
 			pg->peer_missing[*i];
 			continue;
 		}
+
+		/*
+		 * OyTao: last_backfill == hobject, 则说明在past_intervals中，remote OSD
+		 * 标记需要执行backfill操作，但并没有真正开始，所以需要继续执行
+		 * backfill操作.
+		 */
 		if (pi.last_backfill == hobject_t()) {
 			dout(10) << " osd." << *i << " will fully backfill; can infer empty missing set" << dendl;
 			pg->peer_missing[*i];
 			continue;
 		}
 
+		/*
+		 * OyTao: last_update == last_complete 说明remote OSD完成了recovery操作。
+		 * last_update == current.last_update 说明remote OSD日志与权威日志一致
+		 * 所以不需要操作
+		 */
 		if (pi.last_update == pi.last_complete &&  // peer has no missing
 					pi.last_update == pg->info.last_update) {  // peer is up to date
 			// replica has no missing and identical log as us.  no need to
@@ -7713,6 +7743,16 @@ PG::RecoveryState::GetMissing::GetMissing(my_context ctx)
 
 		// We pull the log from the peer's last_epoch_started to ensure we
 		// get enough log to detect divergent updates.
+		/*
+		 * OyTao: Now, remote OSD与current的OSD肯定有重叠
+		 * 如果remote OSD log.tail < current OSD last_epoch_started,
+		 * 则从last_epoch_started开始获取日志。
+		 * 如果remote OSD log.tail > current OSD last_epoch_started,
+		 * 则从remote OSD log.tail开始获取FULL_LOG
+		 *
+		 * 等待获取remote OSD Log都存放在@peer_missing_requested中。
+		 * 同时添加到blocked_by序列中.
+		 */
 		eversion_t since(pi.last_epoch_started, 0);
 		assert(pi.last_update >= pg->info.log_tail);  // or else choose_acting() did a bad thing
 		if (pi.log_tail <= since) {
@@ -7738,6 +7778,9 @@ PG::RecoveryState::GetMissing::GetMissing(my_context ctx)
 		pg->blocked_by.insert(i->osd);
 	}
 
+	/* 
+	 * OyTao:为什么需要NeedUpThru  TODO
+	 */
 	if (peer_missing_requested.empty()) {
 		if (pg->need_up_thru) {
 			dout(10) << " still need up_thru update before going active" << dendl;
@@ -7750,15 +7793,25 @@ PG::RecoveryState::GetMissing::GetMissing(my_context ctx)
 	} else {
 		pg->publish_stats_to_osd();
 	}
+
+
 }
 
+/*
+ * OyTao: primary OSD在GetMissing状态下收到其他从OSD的日志信息
+ */
 boost::statechart::result PG::RecoveryState::GetMissing::react(const MLogRec& logevt)
 {
 	PG *pg = context< RecoveryMachine >().pg;
 
+	/*
+	 * OyTao: 首先从@peer_missing_requested中删除该从OSD
+	 */
 	peer_missing_requested.erase(logevt.from);
+
 	pg->proc_replica_log(*context<RecoveryMachine>().get_cur_transaction(),
 				logevt.msg->info, logevt.msg->log, logevt.msg->missing, logevt.from);
+
 
 	if (peer_missing_requested.empty()) {
 		if (pg->need_up_thru) {

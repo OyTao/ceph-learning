@@ -184,6 +184,9 @@ struct PGLog {
 			}
 		}
 
+		/*
+		 * OyTao: TODO
+		 */
 		void index() {
 			objects.clear();
 			caller_ops.clear();
